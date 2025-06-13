@@ -144,6 +144,7 @@
       align-items: center;
       gap: 12px;
       font-size: 0.95rem;
+      max-width: 350px;
     }
     
     @keyframes slideIn {
@@ -154,6 +155,27 @@
     @keyframes fadeOut {
       from { opacity: 1; }
       to { opacity: 0; visibility: hidden; }
+    }
+    
+    /* New styles for notification types */
+    .notification-success {
+      background: var(--success);
+      color: white;
+    }
+    
+    .notification-error {
+      background: var(--danger);
+      color: white;
+    }
+    
+    .notification-info {
+      background: var(--accent);
+      color: white;
+    }
+    
+    .notification-warning {
+      background: var(--warning);
+      color: white;
     }
   </style>
 </head>
@@ -179,7 +201,7 @@
             <span class="input-icon">
               <i class="fas fa-envelope"></i>
             </span>
-            <input type="email" class="form-input" placeholder="admin@asphaltpro.com" id="admin-email" required>
+            <input type="email" class="form-input" placeholder="admin@gmail.com" id="admin-email" required>
           </div>
         </div>
         
@@ -221,6 +243,12 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', function() {
+
+      if (sessionStorage.getItem('logoutSuccess') === 'true') {
+        showNotification('You have been logged out successfully.', 'success');
+        sessionStorage.removeItem('logoutSuccess'); // Clear the flag
+      }
+
       // DOM elements
       const loginForm = document.getElementById('admin-login-form');
       const passwordToggle = document.getElementById('password-toggle');
@@ -243,51 +271,64 @@
       // Login form submission
       loginForm.addEventListener('submit', function(e) {
         e.preventDefault();
-        
+
         const email = document.getElementById('admin-email').value;
         const password = document.getElementById('admin-password').value;
-        
-        // Simulate login process
-        if (email === 'admin@asphaltpro.com' && password === 'password123') {
-          showNotification('Login successful! Redirecting to dashboard...', 'success');
-          
-          // Redirect to dashboard after delay
-          setTimeout(() => {
-            window.location.href = "admin_dashboard.html";
-          }, 1500);
-        } else {
-          showNotification('Invalid credentials. Please try again.', 'error');
-        }
+
+        fetch('/admin/login', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: `email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showNotification('Login successful! Redirecting to dashboard...', 'success');
+              setTimeout(() => {
+                window.location.href = '/admin/dashboard';
+              }, 1500);
+            } else {
+              showNotification(data.message, 'error');
+            }
+          })
+          .catch(error => {
+          showNotification('Error during login. Please try again.', 'error');
+          console.error('Login error:', error);
+        });
       });
       
-      // Notification function
+      // Enhanced notification function
       function showNotification(message, type) {
         const notificationContainer = document.getElementById('notificationContainer');
+        
+        // Clear any existing notifications
+        notificationContainer.innerHTML = '';
+        
+        // Create notification element
         const notification = document.createElement('div');
+        notification.className = `notification notification-${type}`;
         
-        // Set notification styles based on type
-        let bgColor = 'bg-blue-100 text-blue-800';
-        let icon = 'fa-info-circle';
-        if (type === 'error') {
-          bgColor = 'bg-red-100 text-red-800';
-          icon = 'fa-exclamation-circle';
-        }
-        if (type === 'success') {
-          bgColor = 'bg-green-100 text-green-800';
-          icon = 'fa-check-circle';
-        }
-        if (type === 'warning') {
-          bgColor = 'bg-yellow-100 text-yellow-800';
-          icon = 'fa-exclamation-triangle';
-        }
-        if (type === 'info') {
-          bgColor = 'bg-blue-100 text-blue-800';
-          icon = 'fa-info-circle';
+        // Set icon based on notification type
+        let iconClass = 'fa-info-circle';
+        switch(type) {
+          case 'success':
+            iconClass = 'fa-check-circle';
+            break;
+          case 'error':
+            iconClass = 'fa-exclamation-circle';
+            break;
+          case 'warning':
+            iconClass = 'fa-exclamation-triangle';
+            break;
+          case 'info':
+            iconClass = 'fa-info-circle';
+            break;
         }
         
-        notification.className = `notification ${bgColor}`;
         notification.innerHTML = `
-          <i class="fas ${icon} text-lg"></i>
+          <i class="fas ${iconClass} text-lg"></i>
           <p class="text-sm font-medium">${message}</p>
         `;
         
@@ -300,42 +341,5 @@
       }
     });
   </script>
-  <!-- Add this to the head section -->
-<script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const loginForm = document.getElementById('admin-login-form');
-        
-        loginForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const email = document.getElementById('admin-email').value;
-            const password = document.getElementById('admin-password').value;
-            
-            // Create form data
-            const formData = new FormData();
-            formData.append('email', email);
-            formData.append('password', password);
-            
-            // Send login request
-            fetch('/admin/login', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => {
-                if (response.redirected) {
-                    window.location.href = response.url;
-                } else {
-                    return response.text().then(text => {
-                        document.body.innerHTML = text;
-                    });
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showNotification('Login failed. Please try again.', 'error');
-            });
-        });
-    });
-</script>
 </body>
 </html>
