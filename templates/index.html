@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI-Powered Bid Assistant | AsphaltPro</title>
+
+  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Open+Sans:wght@300;400;600&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
@@ -601,12 +604,12 @@
             
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
               <div>
-                <label class="form-label">Land-Mile</label>
+                <label class="form-label">Land-Mile <span id="area-required" class="required-badge">*</span></label>
                 <input type="number" min="0" class="form-input" placeholder="Land-Mile" id="land-mile">
               </div>
               
               <div>
-                <label class="form-label">Width (ft)</label>
+                <label class="form-label">Width (ft) <span id="area-required" class="required-badge">*</span></label>
                 <input type="number" min="0" class="form-input" placeholder="Width in feet" id="width">
               </div>
               
@@ -616,7 +619,7 @@
               </div>
               
               <div>
-                <label class="form-label">Material Type</label>
+                <label class="form-label">Material Type <span id="area-required" class="required-badge">*</span></label>
                 <select class="form-input" id="material-type" required>
                   <option value="">Select material</option>
                   <option value="asphalt">Asphalt</option>
@@ -636,10 +639,15 @@
               </div>
             </div>
             
+            <!-- Note Section -->
             <div class="area-info mb-4">
               <i class="fas fa-info-circle text-blue-500 mr-2"></i>
-              <strong>Note:</strong> If you provide both Land-Mile and Width, the Area will be automatically calculated. 
-              Otherwise, you must enter the Area manually.
+              <strong>Note:</strong> If you provide both Land-Mile and Width(ft.), Then the Area(sq.ft.) will be automatically calculated.
+              And you can enter the value for Area(sq.ft.) manually, if you want to.
+              <br>
+              <div class="ml-16">
+                Tonnage will be calculated automatically based on Area(sq.ft.) and Material Type. You can enter it manually also if you want to.
+              </div>
             </div>
             
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -818,6 +826,15 @@
   <div id="notificationContainer"></div>
 
   <script>
+    const MATERIAL_CONSTANTS = {
+      'asphalt': { density: 145, thickness: 0.33 },
+      'recycled asphalt': { density: 145, thickness: 0.25 },
+      'concrete': { density: 145, thickness: 0.5 },
+      'bituminous surface': { density: 145, thickness: 0.17 },
+      'sealcoat': { density: 0, thickness: 0 } // Not applicable
+    };
+
+
     document.addEventListener('DOMContentLoaded', function() {
       // Tab switching
       const tabs = document.querySelectorAll('.tab-button');
@@ -869,7 +886,7 @@
       const width = document.getElementById('width');
       const projectArea = document.getElementById('project-area');
       const materialType = document.getElementById('material-type');
-      const tonnage = document.getElementById('tonnage');
+      const tonnageInput = document.getElementById('tonnage');
       const areaRequiredBadge = document.getElementById('area-required');
       
       // Result elements
@@ -894,6 +911,20 @@
       const resultTrucks = document.getElementById('result-trucks');
       const resultTonnage = document.getElementById('result-tonnage');
       
+      // Function to calculate tonnage
+      function updateTonnage() {
+        const areaVal = parseFloat(projectArea.value) || 0;
+        const material = materialType.value;
+        const constants = MATERIAL_CONSTANTS[material];
+        
+        if (constants && areaVal > 0 && constants.density > 0) {
+          const volume = areaVal * constants.thickness;
+          const weightLbs = volume * constants.density;
+          const tons = weightLbs / 2000;
+          tonnageInput.value = tons.toFixed(1);
+        }
+      }
+
       // Handle area calculation and requirement
       // Enhanced area calculation
       function updateAreaRequirement() {
@@ -905,9 +936,9 @@
           areaRequiredBadge.classList.add('optional-badge');
           areaRequiredBadge.textContent = 'Optional';
           
-          // Calculate area: land-mile × 5280 × width (ft)
           const calculatedArea = landMileVal * 5280 * widthVal;
           projectArea.value = Math.round(calculatedArea);
+          updateTonnage(); // NEW: Update tonnage when area changes
         } else {
           areaRequiredBadge.classList.remove('optional-badge');
           areaRequiredBadge.classList.add('required-badge');
@@ -915,6 +946,10 @@
         }
       }
       
+      // Tonnage Calculation
+      projectArea.addEventListener('input', updateTonnage);
+      materialType.addEventListener('change', updateTonnage);
+
       // Listen to input changes for land-mile and width
       landMile.addEventListener('input', updateAreaRequirement);
       width.addEventListener('input', updateAreaRequirement);
