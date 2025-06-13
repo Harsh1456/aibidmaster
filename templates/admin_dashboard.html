@@ -688,7 +688,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Logout
   function logout() {
-    window.location.href = "{{ url_for('admin_logout') }}";
+      // Set logout flag in sessionStorage
+      sessionStorage.setItem('logoutSuccess', 'true');
+      window.location.href = "{{ url_for('admin_logout') }}";
   }
   if (logoutBtn) logoutBtn.addEventListener('click', logout);
   if (detailLogoutBtn) detailLogoutBtn.addEventListener('click', logout);
