@@ -31,8 +31,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@asphaltpro.com')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'password123')
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@aibidmaster.com')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@1235')
 
 # Industry-standard constants
 ASPHALT_DENSITY = 145  # lbs per cubic foot
@@ -122,9 +122,9 @@ def admin_login():
     
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         session['admin_logged_in'] = True
-        return redirect(url_for('admin_dashboard'))
+        return jsonify({'success': True})
     
-    return render_template('admin_login.html', error='Invalid credentials')
+    return jsonify({'success': False, 'message': 'Invalid credentials, Please Try Again'})
 
 
 @app.route('/admin/dashboard', methods=['GET'])
@@ -662,7 +662,13 @@ def calculate_estimate():
     return process_estimate(data)
 
 def calculate_materials(area_sqft, material_type, tonnage):
-    """Calculate materials for various pavement types using DC rates and specs"""
+    """Calculate materials for various pavement types using DC rates and specs."""
+
+    # Constants (define these at the module level)
+    ASPHALT_THICKNESS = 0.33  # default 4 inches
+    ASPHALT_DENSITY = 145     # lbs per cubic foot
+    CONCRETE_THICKNESS = 0.5  # default 6 inches
+
     material_type = material_type.lower().strip()
     results = {}
 
@@ -677,12 +683,13 @@ def calculate_materials(area_sqft, material_type, tonnage):
                 thickness = 0.25  # 3 inches
             volume_cf = area_sqft * thickness
             asphalt_tons = (volume_cf * ASPHALT_DENSITY) / 2000
+        
         results['asphalt_tons'] = round(asphalt_tons, 1)
-        results['aggregate_tons'] = round(asphalt_tons * 1.25, 1)
+        results['aggregate_tons'] = round(asphalt_tons * 1.25, 1)  # DC-adjusted base material
         results['rebar_lbs'] = round(area_sqft * 0.6)
         results['emulsion_gal'] = round(area_sqft * 0.06, 1)
         results['sealcoat_sqft'] = round(area_sqft)
-        results['thermoplastic_strip_ft'] = round(area_sqft / 10)  # Example: 1 ft per 10 sqft
+        results['thermoplastic_strip_ft'] = round(area_sqft / 10)
 
     elif material_type in ['concrete', 'sidewalk', 'pavers']:
         thickness = CONCRETE_THICKNESS
@@ -690,6 +697,7 @@ def calculate_materials(area_sqft, material_type, tonnage):
             thickness = 0.33  # 4 inches
         elif material_type == 'pavers':
             thickness = 0.17  # 2 inches
+
         volume_cf = area_sqft * thickness
         concrete_yds = volume_cf / 27
         results['concrete_yds'] = round(concrete_yds, 1)
@@ -702,7 +710,7 @@ def calculate_materials(area_sqft, material_type, tonnage):
     elif material_type == 'aggregate base':
         thickness = 0.5  # 6 inches
         volume_cf = area_sqft * thickness
-        aggregate_tons = (volume_cf * 110) / 2000  # 110 lbs/cf for aggregate
+        aggregate_tons = (volume_cf * 110) / 2000
         results['aggregate_tons'] = round(aggregate_tons, 1)
 
     elif material_type == 'subbase':
@@ -718,63 +726,61 @@ def calculate_materials(area_sqft, material_type, tonnage):
         results['sealcoat_sqft'] = round(area_sqft)
 
     elif material_type == 'thermoplastic striping':
-        results['thermoplastic_strip_ft'] = round(area_sqft / 10)  # Example: 1 ft per 10 sqft
+        results['thermoplastic_strip_ft'] = round(area_sqft / 10)
 
     elif material_type == 'curb':
-        results['curb_ft'] = round(area_sqft / 5)  # Example: 1 ft curb per 5 sqft
+        results['curb_ft'] = round(area_sqft / 5)
 
     elif material_type == 'drainage pipe':
-        results['drainage_pipe_ft'] = round(area_sqft / 100)  # Example: 1 ft per 100 sqft
+        results['drainage_pipe_ft'] = round(area_sqft / 100)
 
     elif material_type == 'stormwater structure':
-        results['stormwater_structures'] = max(1, round(area_sqft / 20000))  # 1 per 20,000 sqft
+        results['stormwater_structures'] = max(1, round(area_sqft / 20000))
 
     else:
-        # Default to asphalt if unknown
+        # Default fallback to asphalt
         return calculate_materials(area_sqft, 'asphalt', tonnage)
 
     return results
+
+
+# Updated labor calculations
 def calculate_labor(area_sqft, duration_weeks, project_type):
-    """Washington DC-specific labor calculations"""
-    # Higher base rates for DC urban projects
+    # DC-specific labor rates and productivity
     if "road" in project_type.lower():
-        base_hours = 100
+        base_hours = 60  # hours per 1000 sq ft (includes prep, paving, finishing)
     else:
-        base_hours = 120
+        base_hours = 75  # hours per 1000 sq ft for non-road projects
     
-    # Add 15% premium for DC location
-    total_hours = (area_sqft / 1000) * base_hours * 1.15
+    # Add 20% premium for DC urban projects
+    total_hours = (area_sqft / 1000) * base_hours * 1.20
     
-    # Distribute hours across phases (same as before)
-    management_hours = total_hours * 0.15
-    prep_hours = total_hours * 0.25
-    paving_hours = total_hours * 0.45
-    finishing_hours = total_hours * 0.15
-    
-    weekly_hours = total_hours / duration_weeks if duration_weeks > 0 else total_hours
+    # Distribute hours across phases
+    management_hours = total_hours * 0.12
+    prep_hours = total_hours * 0.30
+    paving_hours = total_hours * 0.40
+    finishing_hours = total_hours * 0.18
     
     return {
         'management_hours': round(management_hours),
         'prep_hours': round(prep_hours),
         'paving_hours': round(paving_hours),
         'finishing_hours': round(finishing_hours),
-        'total_hours': round(total_hours),
-        'weekly_hours': round(weekly_hours)
+        'total_hours': round(total_hours)
     }
 
 def calculate_equipment(area_sqft, duration_weeks):
-    """Calculate equipment requirements based on project size"""
-    # Calculate equipment needs
-    pavers = max(1, math.ceil(area_sqft / 50000))  # 1 paver per 50,000 sq ft
-    rollers = max(1, math.ceil(area_sqft / 30000))  # 1 roller per 30,000 sq ft
-    excavators = 1 if area_sqft < 100000 else 2
-    trucks = max(2, math.ceil(area_sqft / 20000))  # 1 truck per 20,000 sq ft
+    # Calculate equipment needs based on DC productivity standards
+    pavers = max(1, math.ceil(area_sqft / 80000))  # 1 paver per 80,000 sq ft
+    rollers = max(1, math.ceil(area_sqft / 40000))  # 1 roller per 40,000 sq ft
+    excavators = 1 if area_sqft < 150000 else 2
+    trucks = max(2, math.ceil(area_sqft / 30000))  # 1 truck per 30,000 sq ft
     
-    # Calculate equipment costs
-    paver_cost = pavers * 1500 * duration_weeks
-    roller_cost = rollers * 800 * duration_weeks
-    excavator_cost = excavators * 1200 * duration_weeks
-    truck_cost = trucks * 600 * duration_weeks
+    # Updated DC equipment rental rates ($/week)
+    paver_cost = pavers * 2200 * duration_weeks
+    roller_cost = rollers * 950 * duration_weeks
+    excavator_cost = excavators * 1800 * duration_weeks
+    truck_cost = trucks * 850 * duration_weeks
     
     return {
         'pavers': pavers,
