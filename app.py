@@ -35,23 +35,23 @@ ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@aibidmaster.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@1235')
 
 # Industry-standard constants
-ASPHALT_DENSITY = 145  # lbs per cubic foot
-ASPHALT_THICKNESS = 0.25  # feet (3 inches)
-CONCRETE_DENSITY = 150  # lbs per cubic foot
-CONCRETE_THICKNESS = 0.33  # feet (4 inches)
-LABOR_RATE = 52.50  # dollars per hour
-MATERIAL_MARKUP = 1.25  # 25% markup
-EQUIPMENT_RATE_MULTIPLIER = 1.15
-PROFIT_MARGIN = 0.18  # 18%
-OVERHEAD_RATE = 0.12  # 12%
+ASPHALT_DENSITY = 150  # lbs per cubic foot (DC standard)
+ASPHALT_THICKNESS = 0.33  # feet (4 inches typical for DC roads)
+CONCRETE_DENSITY = 145  # lbs per cubic foot
+CONCRETE_THICKNESS = 0.42  # feet (5 inches for DC pavements)
+LABOR_RATE = 68.50  # DC union rates
+MATERIAL_MARKUP = 1.18  # 18% markup
+EQUIPMENT_RATE_MULTIPLIER = 1.10  # Reduced markup
+PROFIT_MARGIN = 0.12  # 12% more competitive
+OVERHEAD_RATE = 0.15  # 15% higher for DC
 ASPHALT_COST_PER_TON = 135  # Washington DC market rate
 CONCRETE_COST_PER_YD = 165  # Washington DC market rate
 
 # Material unit costs (Washington DC market rates, 2024–2025)
 MATERIAL_UNIT_COSTS = {
-    'asphalt': 135,                # $/ton
-    'concrete': 165,               # $/cubic yard
-    'aggregate base': 38,          # $/ton
+    'asphalt': 155,                # $/ton (increased for DC)
+    'concrete': 185,               # $/cubic yard
+    'aggregate base': 42,          # $/ton
     'recycled asphalt': 110,       # $/ton
     'bituminous surface': 140,     # $/ton
     'subbase': 30,                 # $/ton
@@ -189,7 +189,7 @@ def get_projects():
 # Project Accept
 @app.route('/api/admin/projects/<int:project_id>/accept', methods=['POST'])
 def accept_project(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if project:
         project.status = 'accepted'
         db.session.commit()
@@ -200,7 +200,7 @@ def accept_project(project_id):
 # Project Reject
 @app.route('/api/admin/projects/<int:project_id>/reject', methods=['POST'])
 def reject_project(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if project:
         project.status = 'rejected'
         db.session.commit()
@@ -211,7 +211,7 @@ def reject_project(project_id):
 # Project Delete
 @app.route('/api/admin/projects/<int:project_id>', methods=['DELETE'])
 def delete_project(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if project:
         db.session.delete(project)
         db.session.commit()
@@ -221,7 +221,7 @@ def delete_project(project_id):
 
 @app.route('/api/admin/projects/<int:project_id>', methods=['GET'])
 def get_project(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if project:
         return jsonify({
             'id': project.id,
@@ -900,7 +900,7 @@ def calculate_success_probability(project_type, area_sqft, duration_weeks):
 # Download Report  
 @app.route('/download_report/<int:project_id>', methods=['GET'])
 def download_report(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     
@@ -914,7 +914,7 @@ def download_report(project_id):
 
 @app.route('/download_report_csv/<int:project_id>', methods=['GET'])
 def download_report_csv(project_id):
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)  # Updated
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     
