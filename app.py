@@ -1,15 +1,16 @@
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for, make_response
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime, timedelta
-from flask_cors import CORS
-from dotenv import load_dotenv
+import pymysql
 import math
 import base64
 import os
 import re
 import csv
 import json
-import pdfkit
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for, make_response
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, timedelta
+from flask_cors import CORS
+from dotenv import load_dotenv
+from urllib.parse import urlparse
 from dateutil.parser import parse as parse_date
 import PyPDF2
 import openai
@@ -19,107 +20,148 @@ from io import BytesIO, StringIO
 from weasyprint import HTML
 from weasyprint.text.fonts import FontConfiguration
 
+# Load environment variables from .env file
 load_dotenv()
-app = Flask(__name__)
-CORS(app)
-app.secret_key = os.environ.get('SECRET_KEY')
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable Cross-Origin Resource Sharing
+app.secret_key = os.environ.get('SECRET_KEY')  # Set secret key for session management
+client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))  # OpenAI API
+
+# Configure Flask app settings
 app.config['ENV'] = os.environ.get('FLASK_ENV', 'production')
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
+# Admin credentials for dashboard access
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@aibidmaster.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@1235')
 
-# Industry-standard constants
-ASPHALT_DENSITY = 150  # lbs per cubic foot (DC standard)
-ASPHALT_THICKNESS = 0.33  # feet (4 inches typical for DC roads)
-CONCRETE_DENSITY = 145  # lbs per cubic foot
-CONCRETE_THICKNESS = 0.42  # feet (5 inches for DC pavements)
-LABOR_RATE = 68.50  # DC union rates
-MATERIAL_MARKUP = 1.18  # 18% markup
-EQUIPMENT_RATE_MULTIPLIER = 1.10  # Reduced markup
-PROFIT_MARGIN = 0.12  # 12% more competitive
-OVERHEAD_RATE = 0.15  # 15% higher for DC
-ASPHALT_COST_PER_TON = 135  # Washington DC market rate
-CONCRETE_COST_PER_YD = 165  # Washington DC market rate
+# Virginia-specific constants (2025, VDOT and RSMeans standards)
+ASPHALT_DENSITY = 145  # lbs per cubic foot, VDOT average for hot-mix asphalt (HMA)
+RECYCLED_DENSITY = 140  # lbs per cubic foot for recycled asphalt
+CONCRETE_DENSITY = 150  # lbs per cubic foot
+LABOR_RATE = 62.50  # $/hour, Virginia union labor rates, 2025
+MATERIAL_MARKUP = 1.15  # 15% markup, standard for Virginia contractors
+EQUIPMENT_RATE_MULTIPLIER = 1.12  # 12% markup for equipment overhead
+PROFIT_MARGIN = 0.10  # 10% profit margin, competitive for VDOT projects
+OVERHEAD_RATE = 0.12  # 12% overhead, typical for Virginia construction
 
-# Material unit costs (Washington DC market rates, 2024–2025)
+
+# Material unit costs (Virginia market rates, 2025)
 MATERIAL_UNIT_COSTS = {
-    'asphalt': 155,                # $/ton (increased for DC)
-    'concrete': 185,               # $/cubic yard
-    'aggregate base': 42,          # $/ton
-    'recycled asphalt': 110,       # $/ton
-    'bituminous surface': 140,     # $/ton
-    'subbase': 30,                 # $/ton
-    'geotextile': 1.25,            # $/sq yd
-    'emulsion': 3.5,               # $/gallon
-    'sealcoat': 0.45,              # $/sq ft
-    'thermoplastic striping': 2.5, # $/linear ft
-    'curb': 38,                    # $/linear ft (concrete)
-    'sidewalk': 12,                # $/sq ft (concrete)
-    'pavers': 18,                  # $/sq ft
-    'rebar': 0.65,                 # $/lb
-    'drainage pipe': 38,           # $/linear ft
-    'stormwater structure': 2500,  # $/each
-    # Add more as needed
+    'asphalt': 110,                # $/ton
+    'recycled asphalt': 85,        # $/ton
+    'concrete': 170,               # $/cubic yard
+    'bituminous surface': 120,     # $/ton
+    'sealcoat': 0.55,              # $/sq ft
+    'rebar': 0.80,                 # $/lb
+    'aggregate base': 42           # $/ton
 }
 
-# Project Model 
+# Material thickness standards (in feet)
+THICKNESS = {
+    'asphalt': 0.33,          # 4 inches
+    'recycled asphalt': 0.25, # 3 inches
+    'bituminous surface': 0.17, # 2 inches
+    'concrete': 0.42,         # 6 inches
+    'sealcoat': 0.02          # 0.25 inches
+}
+
+MATERIAL_CONSTANTS = {
+    'asphalt': {'density': 145, 'thickness': 0.33},  # VDOT standard HMA
+    'recycled asphalt': {'density': 140, 'thickness': 0.25},  # Virginia recycled mix
+    'concrete': {'density': 150, 'thickness': 0.42},  # VDOT concrete spec
+    'bituminous surface': {'density': 145, 'thickness': 0.17},  # Virginia surface treatment
+    'sealcoat': {'density': 100, 'thickness': 0.02}   # Sealcoat
+}
+
+# Virginia-specific profit margins (2025)
+PROFIT_MARGINS = {
+    'road': {'min': 0.08, 'max': 0.15},
+    'bridge': {'min': 0.12, 'max': 0.20},
+    'building': {'min': 0.10, 'max': 0.18},
+    'renovation': {'min': 0.15, 'max': 0.22}
+}
+
+# Market Rates table
+class MarketRate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    value = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String(255), nullable=False)
+
+# Project Model: Defines the database schema for storing project details
 class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), nullable=False)
-    type = db.Column(db.String(100), nullable=False)
-    location = db.Column(db.String(255), nullable=False)
-    submitted = db.Column(db.Date, nullable=False)
-    status = db.Column(db.Enum('pending', 'accepted', 'rejected'), default='pending')
-    cost = db.Column(db.String(50), nullable=False)
-    completion_date = db.Column(db.Date)
-    land_mile = db.Column(db.Float)
-    width = db.Column(db.Float)
-    area = db.Column(db.Float, nullable=False)
-    material = db.Column(db.String(50), nullable=False)
-    tonnage = db.Column(db.Float)
-    scope = db.Column(db.Text, nullable=False)
-    requirements = db.Column(db.Text)
-    estimated_cost = db.Column(db.String(50))
-    profit_margin = db.Column(db.String(20))
-    success_probability = db.Column(db.String(20))
-    asphalt_tons = db.Column(db.Float)
-    concrete_yds = db.Column(db.Float)
-    rebar_lbs = db.Column(db.Float)
-    aggregate_tons = db.Column(db.Float)
-    management_hours = db.Column(db.Integer)
-    prep_hours = db.Column(db.Integer)
-    paving_hours = db.Column(db.Integer)
-    finishing_hours = db.Column(db.Integer)
+    name = db.Column(db.String(500), nullable=False)  # Project name
+    type = db.Column(db.String(100), nullable=False)  # Project type (e.g., road)
+    location = db.Column(db.String(255), nullable=False)  # Project location
+    submitted = db.Column(db.Date, nullable=False)  # Submission date
+    status = db.Column(db.Enum('pending', 'accepted', 'rejected'), default='pending')  # Project status
+    cost = db.Column(db.String(50), nullable=False)  # Estimated cost
+    completion_date = db.Column(db.Date)  # Completion date
+    land_mile = db.Column(db.Float)  # Length in lane miles
+    width = db.Column(db.Float)  # Width in feet
+    area = db.Column(db.Float, nullable=False)  # Area in sq ft
+    material = db.Column(db.String(50), nullable=False)  # Material type (e.g., concrete)
+    tonnage = db.Column(db.Float)  # Material tonnage
+    scope = db.Column(db.Text, nullable=False)  # Project scope
+    requirements = db.Column(db.Text)  # Special requirements
+    estimated_cost = db.Column(db.String(50))  # Estimated cost (formatted)
+    profit_margin = db.Column(db.Float)  # Profit margin percentage
+    success_probability = db.Column(db.String(20))  # Success probability
+    asphalt_tons = db.Column(db.Float)  # Asphalt quantity in tons
+    concrete_yds = db.Column(db.Float)  # Concrete quantity in cubic yards
+    bituminous_tons = db.Column(db.Float)
+    sealcoat_sqft = db.Column(db.Float)
+    rebar_lbs = db.Column(db.Float)  # Rebar quantity in pounds
+    aggregate_tons = db.Column(db.Float)  # Aggregate quantity in tons
+    management_hours = db.Column(db.Integer)  # Management labor hours
+    prep_hours = db.Column(db.Integer)  # Site preparation labor hours
+    paving_hours = db.Column(db.Integer)  # Paving labor hours
+    finishing_hours = db.Column(db.Integer)  # Finishing labor hours
+    cost_breakdown = db.Column(db.JSON)
 
-# Create tables before first request
-# @app.before_first_request
-# def create_tables():
-#     db.create_all()
 
-# Add root route to serve index.html
+with app.app_context():
+    db.create_all()
+
+
+# Serve the main index page
 @app.route('/')
 def index():
     return render_template('index.html')
 
 
-# Admin routes
+# Add headers to prevent caching for admin sessions
+@app.after_request
+def add_header(response):
+    if 'admin_logged_in' in session:
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
+
+
+# Serve the admin login page
 @app.route('/admin', methods=['GET'])
 def admin_login_page():
+    session.pop('admin_logged_in', None)  # Clear admin session
     return render_template('admin_login.html')
 
 
+# Handle admin login
 @app.route('/admin/login', methods=['POST'])
 def admin_login():
     data = request.form
     email = data.get('email')
     password = data.get('password')
     
+    # Verify admin credentials
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         session['admin_logged_in'] = True
         return jsonify({'success': True})
@@ -127,12 +169,13 @@ def admin_login():
     return jsonify({'success': False, 'message': 'Invalid credentials, Please Try Again'})
 
 
+# Serve the admin dashboard
 @app.route('/admin/dashboard', methods=['GET'])
 def admin_dashboard():
     if not session.get('admin_logged_in'):
         return redirect(url_for('admin_login_page'))
     
-    status = request.args.get('status', 'pending')
+    status = request.args.get('status', 'pending')  # Filter by project status
     query = Project.query
     
     if status != 'all':
@@ -144,24 +187,92 @@ def admin_dashboard():
                            projects=projects)
 
 
-@app.route('/admin/project/<int:project_id>', methods=['GET'])
+# Serve project detail page
+@app.route('/admin/projects/<int:project_id>', methods=['GET'])
 def admin_project_detail(project_id):
     if not session.get('admin_logged_in'):
         return redirect(url_for('admin_login_page'))
     
-    project = next((p for p in projects if p['id'] == project_id), None)
+    project = db.session.get(Project, project_id)
     if not project:
-        return "Project not found", 404
+        return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_dashboard.html', project=project)
+    return render_template('project_detail.html', project=project)
 
 
+# Market rates management page
+@app.route('/admin/market_rates', methods=['GET'])
+def market_rates_management():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login_page'))
+    
+    rates = MarketRate.query.all()
+    return render_template('market_rates.html', market_rates=rates)
+
+# Update market rates
+@app.route('/admin/market_rates/update', methods=['POST'])
+def update_market_rates():
+    if not session.get('admin_logged_in'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    data = request.json
+    for name, value in data.items():
+        rate = MarketRate.query.filter_by(name=name).first()
+        if rate:
+            try:
+                rate.value = float(value)
+            except ValueError:
+                return jsonify({'error': f'Invalid value for {name}'}), 400
+    
+    try:
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Initialize market rates if they don't exist
+def initialize_market_rates():
+    rates = [
+        {'name': 'ASPHALT_UNIT_COST', 'value': 110, 'description': 'Current market cost per ton of asphalt ($)'},
+        {'name': 'RECYCLED_ASPHALT_COST', 'value': 85, 'description': 'Current market cost per ton of recycled asphalt ($)'},
+        {'name': 'CONCRETE_UNIT_COST', 'value': 170, 'description': 'Current market cost per cubic yard of concrete ($)'},
+        {'name': 'BITUMINOUS_SURFACE_COST', 'value': 120, 'description': 'Current market cost per ton of bituminous surface ($)'},
+        {'name': 'SEALCOAT_UNIT_COST', 'value': 0.55, 'description': 'Current market cost per square foot of sealcoat ($)'},
+        {'name': 'REBAR_UNIT_COST', 'value': 0.80, 'description': 'Current market cost per pound of rebar ($)'},
+        {'name': 'AGGREGATE_BASE_COST', 'value': 42, 'description': 'Current market cost per ton of aggregate base ($)'},
+        {'name': 'LABOR_RATE', 'value': 62.50, 'description': 'Current market hourly labor rate ($/hour)'},
+    ]
+    
+    for rate_data in rates:
+        if not MarketRate.query.filter_by(name=rate_data['name']).first():
+            new_rate = MarketRate(
+                name=rate_data['name'],
+                value=rate_data['value'],
+                description=rate_data['description']
+            )
+            db.session.add(new_rate)
+    
+    db.session.commit()
+
+# Call this function after creating the database
+with app.app_context():
+    db.create_all()
+    initialize_market_rates()
+
+def get_market_rate(name, default=None):
+    rate = MarketRate.query.filter_by(name=name).first()
+    return rate.value if rate else default
+
+
+# Handle admin logout
 @app.route('/admin/logout', methods=['GET'])
 def admin_logout():
     session.pop('admin_logged_in', None)
     return redirect(url_for('admin_login_page'))
 
 
+# Get all projects details
 @app.route('/api/admin/projects', methods=['GET'])
 def get_projects():
     if not session.get('admin_logged_in'):
@@ -174,6 +285,7 @@ def get_projects():
     else:
         projects = Project.query.filter_by(status=status).all()
     
+    # Return project data as JSON
     return jsonify([{
         'id': p.id,
         'name': p.name,
@@ -182,14 +294,13 @@ def get_projects():
         'submitted': p.submitted.strftime('%Y-%m-%d'),
         'status': p.status,
         'cost': p.cost,
-        # Include other fields as needed
     } for p in projects])
 
 
-# Project Accept
+# Accept project
 @app.route('/api/admin/projects/<int:project_id>/accept', methods=['POST'])
 def accept_project(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if project:
         project.status = 'accepted'
         db.session.commit()
@@ -197,10 +308,10 @@ def accept_project(project_id):
     return jsonify({'error': 'Project not found'}), 404
 
 
-# Project Reject
+# Reject project
 @app.route('/api/admin/projects/<int:project_id>/reject', methods=['POST'])
 def reject_project(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if project:
         project.status = 'rejected'
         db.session.commit()
@@ -208,10 +319,10 @@ def reject_project(project_id):
     return jsonify({'error': 'Project not found'}), 404
 
 
-# Project Delete
+# Delete project
 @app.route('/api/admin/projects/<int:project_id>', methods=['DELETE'])
 def delete_project(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if project:
         db.session.delete(project)
         db.session.commit()
@@ -219,10 +330,12 @@ def delete_project(project_id):
     return jsonify({'error': 'Project not found'}), 404
 
 
+# Get project details
 @app.route('/api/admin/projects/<int:project_id>', methods=['GET'])
 def get_project(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if project:
+        # Return detailed project data as JSON
         return jsonify({
             'id': project.id,
             'name': project.name,
@@ -256,19 +369,23 @@ def get_project(project_id):
     return jsonify({'error': 'Project not found'}), 404
 
 
-# PDF Processing
+# Extract text from PDF files
 def extract_text_from_pdf(file):
     pdf_reader = PyPDF2.PdfReader(file)
     text = ""
     for page in pdf_reader.pages:
-        text += page.extract_text()
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
     return text
 
+# Extract text from DOCX files
 def extract_text_from_docx(file):
     doc = Document(BytesIO(file.read()))
     text = ""
     for para in doc.paragraphs:
-        text += para.text + "\n"
+        if para.text.strip():
+            text += para.text + "\n"
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -279,65 +396,95 @@ def extract_text_from_docx(file):
         raise ValueError("No text found in DOCX.")
     return text
 
+# Extract RFP data using regex patterns
 def extract_rfp_data(text):
-    """Improved extraction with better patterns and fallbacks"""
+    """Extract project details from RFP text using regex patterns."""
     data = {}
     
-    # Normalize text for easier matching
+    # Normalize text for consistent matching
     normalized_text = re.sub(r'\s+', ' ', text).lower()
+    original_text = text  # Preserve original for section extraction
     
-    # Extraction patterns - ordered by priority
+    # Define regex patterns for key fields
     patterns = [
-        # Project name/title
-        (r'(?:project\s*name|project\s*title|project):?\s*([^\n]+)', 'project_name'),
-        (r'project\s*#?\s*[\w-]+\s*-\s*([^\n]+)', 'project_name'),
-        
-        # Location
-        (r'(?:project\s*location|location):?\s*([^\n]+)', 'project_location'),
-        (r'in\s*([^\n,]+)(?:\s*county|\s*city|\s*state)', 'project_location'),
-        
-        # Dates
-        (r'(?:completion\s*date|target\s*date|work\s*must\s*be\s*completed\s*by):?\s*([a-z]+\s\d{1,2},\s\d{4}|\d{4}-\d{2}-\d{2})', 'completion_date'),
-        (r'fully\s*completed\s*by\s*([a-z]+\s\d{1,2},\s\d{4}|\d{4}-\d{2}-\d{2})', 'completion_date'),
-        
-        # Duration
-        (r'(?:duration|project\s*duration)\s*\(?\s*weeks?\s*\)?:\s*(\d+)', 'project_duration'),
-        
-        # Measurements
-        (r'(\d+(?:\.\d+)?)\s*lane\s*[-]?\s*mi(?:le)?s?', 'land_mile'),
+        # Project Name
+        (r'(?:project\s*(?:name|title|description)|job\s*(?:name|title))[:\s]*([^\n;]+)', 'project_name'),
+        (r'rfp\s*[#№]\s*[\w-]+\s*[-–—:]\s*([^\n;]+)', 'project_name'),
+        # Project Location
+        (r'(?:project\s*location|location|place|site)[:\s]*([^\n;]+)', 'project_location'),
+        (r'in\s*([^\n,]+)(?:\s*(?:county|city|state|subdivision))', 'project_location'),
+        # Completion Date
+        (r'(?:completion\s*date|target\s*date|work\s*(?:must\s*be\s*)?completed\s*by|deadline)[:\s]*([a-z]+\s*\d{1,2},\s*\d{4}|\d{4}-\d{2}-\d{2})', 'completion_date'),
+        (r'fully\s*completed\s*by\s*([a-z]+\s*\d{1,2},\s*\d{4}|\d{4}-\d{2}-\d{2})', 'completion_date'),
+        # Project Duration
+        (r'(?:duration|project\s*duration|timeline)\s*(?:\(?\s*weeks?\s*\))?[:\s]*(\d+)', 'project_duration'),
+        # Lane Mile
+        (r'(\d+(?:\.\d+)?)\s*(?:lane\s*[-–—]?\s*mi(?:les?)?|mi(?:les?)?)', 'land_mile'),
+        # Width
         (r'(\d+(?:\.\d+)?)\s*(?:ft|feet|foot)(?:\s*width)?', 'width'),
-        (r'area\s*\(?\s*sq\s*ft\s*\)?:\s*([\d,]+(?:\.\d+)?)', 'project_area'),
-        (r'square\s*footage:\s*([\d,]+(?:\.\d+)?)', 'project_area'),
-        
-        # Material
-        (r'\b(asphalt|hma|wma|concrete|aggregate\s*base)\b', 'material_type'),
-        (r'tonnage:\s*([\d,]+(?:\.\d+)?)', 'tonnage'),
-        (r'estimated\s*quantity:\s*([\d,]+(?:\.\d+)?)\s*tons?', 'tonnage'),
+        # Area
+        (r'(?:area\s*\(?\s*sq\s*ft\s*\)?|square\s*footage)[:\s]*([\d,]+(?:\.\d+)?)', 'project_area'),
+        (r'(\d+,?\d*)\s*(?:ft²|square\s*feet|sq\s*ft)', 'project_area'),
+        # Material Type (capture multiple occurrences)
+        (r'\b(asphalt|hma|wma|concrete|aggregate\s*base|recycled\s*asphalt|bituminous\s*surface|subbase|geotextile|sealcoat|thermoplastic\s*striping|curb|sidewalk|pavers|drainage\s*pipe|stormwater\s*structure)\b', 'material_type'),
+        # Tonnage
+        (r'(?:tonnage|quantity\s*tons?)[:\s]*([\d,]+(?:\.\d+)?)\s*(?:tons?)', 'tonnage'),
+        # Quantities with units
+        (r'(\d+,?\d*(?:\.\d+)?)\s*(ft²|ft³|yd³|tons?|lbs?|ft|square\s*feet|cubic\s*yards|linear\s*feet|sq\s*ft|each)\s*(?:of\s*)?(asphalt|hma|concrete|aggregate\s*base|rebar|curb|sidewalk|pavers|drainage\s*pipe|stormwater\s*structure)', 'quantities'),
     ]
     
-    # Apply patterns
+    # Extract fields using patterns
+    quantities = []
     for pattern, key in patterns:
-        if key not in data:  # Only capture first match for each field
-            match = re.search(pattern, normalized_text, re.IGNORECASE)
-            if match:
-                data[key] = match.group(1).strip()
-                if key in ['land_mile', 'width', 'tonnage']:
-                    # Clean numeric values
-                    data[key] = data[key].replace(',', '')
+        if key == 'quantities':
+            matches = re.finditer(pattern, normalized_text, re.IGNORECASE)
+            for match in matches:
+                qty = match.group(1).replace(',', '')
+                unit = match.group(2).lower()
+                material = match.group(3).lower()
+                quantities.append({'quantity': qty, 'unit': unit, 'material': material})
+        else:
+            if key not in data:
+                match = re.search(pattern, normalized_text, re.IGNORECASE)
+                if match:
+                    data[key] = match.group(1).strip()
+                    if key in ['land_mile', 'width', 'tonnage', 'project_area']:
+                        data[key] = data[key].replace(',', '')
     
-    # Special handling for area calculation
+    # Process quantities
+    if quantities:
+        data['quantities'] = []
+        for q in quantities:
+            try:
+                qty = float(q['quantity'])
+                unit = q['unit'].replace('square feet', 'sq ft').replace('cubic yards', 'yd³').replace('linear feet', 'ft')
+                material = q['material']
+                if material == 'hma':
+                    material = 'asphalt'
+                data['quantities'].append({'quantity': qty, 'unit': unit, 'material': material})
+                # Assign primary material and tonnage if applicable
+                if material in ['asphalt', 'aggregate base'] and unit in ['tons']:
+                    data['tonnage'] = str(qty)
+                    data['material_type'] = material
+                elif material == 'concrete' and unit in ['yd³']:
+                    data['concrete_yds'] = qty
+                    data['material_type'] = material
+            except ValueError:
+                pass
+    
+    # Calculate area if not provided
     if 'project_area' not in data and 'land_mile' in data and 'width' in data:
         try:
             land_mile = float(data['land_mile'])
             width = float(data['width'])
-            data['project_area'] = str(round(land_mile * 5280 * width))
+            data['project_area'] = str(round((land_mile * 5280) * width))
         except (ValueError, TypeError):
             pass
     
-    # Extract scope and requirements sections
+    # Extract sections like scope and requirements
     section_patterns = [
-        ('project_scope', r'scope\s*of\s*work:?'),
-        ('project_requirements', r'(?:special\s*conditions|notes|special\s*requirements):?')
+        ('project_scope', r'(?:scope\s*of\s*work|project\s*description|work\s*details)[:\s]*'),
+        ('project_requirements', r'(?:special\s*(?:conditions|notes|requirements)|additional\s*notes)[:\s]*')
     ]
     
     for key, pattern in section_patterns:
@@ -345,73 +492,115 @@ def extract_rfp_data(text):
             match = re.search(pattern, normalized_text, re.IGNORECASE)
             if match:
                 start_pos = match.end()
-                # Find the end of the section (next heading or blank line)
+                # Find section end (next section or end of text)
                 end_pos = len(normalized_text)
-                for end_pattern in [r'\n\s*\n', r'\n[A-Z][A-Z\s]+:']:
+                for end_pattern in [r'\n\s*\n', r'\n[A-Z][A-Z\s]+[:\s]']:
                     end_match = re.search(end_pattern, normalized_text[start_pos:], re.IGNORECASE)
                     if end_match:
                         end_pos = min(end_pos, start_pos + end_match.start())
-                
-                section_text = text[start_pos:end_pos].strip()
+                # Use original text to preserve formatting
+                section_text = original_text[original_text.lower().find(normalized_text[start_pos:end_pos]):].strip()
                 if section_text:
-                    data[key] = section_text
+                    data[key] = section_text[:1000]  # Limit length to avoid DB issues
     
-    # Clean extracted values
+    # Clean extracted data
     for key in data:
         if isinstance(data[key], str):
-            # Remove common trailing punctuation
             data[key] = re.sub(r'^[:;,.]+|[:;,.]+$', '', data[key].strip())
-            # Capitalize first letter for certain fields
             if key in ['project_name', 'project_location', 'material_type']:
-                data[key] = data[key][0].upper() + data[key][1:]
+                data[key] = data[key][0].upper() + data[key][1:] if data[key] else ''
     
     return data
 
-
+# Extract RFP data using OpenAI GPT
 def extract_fields_with_openai(text):
+    """Use OpenAI GPT to extract structured data from RFP text."""
+    
+    # Define prompt with examples and explicit instructions
     prompt = """
-You are an expert at extracting structured data from construction RFPs. 
-Given the following RFP text, extract and map all relevant fields to this schema, even if the field names in the RFP are different or in a different format. 
-If a field is missing, use null or an empty string. 
-If you find synonymous fields (e.g., "Job Title" for "project_name", "Place" for "project_location"), map them accordingly.
+You are an expert at extracting structured data from construction RFPs. Extract and map all relevant fields from the provided RFP text to the following schema, even if the field names in the RFP differ or are in a different format. Use synonymous terms to map to the schema (e.g., "Job Title" or "Project Description" for "project_name", "Place" or "Site" for "project_location"). If a field is missing, infer it based on context or return an empty string. For quantities, handle multiple materials (e.g., asphalt, concrete) and convert units if necessary (e.g., ft³ to yd³ or tons).
 
-Respond with a JSON object with these keys:
-- project_name
-- project_type
-- project_location
-- completion_date
-- project_duration
-- land_mile
-- width
-- project_area
-- material_type
-- tonnage
-- project_scope
-- project_requirements
+Respond with a JSON object containing these keys:
+- project_name (string)
+- project_type (string, e.g., 'road', 'sidewalk', 'general')
+- project_location (string)
+- completion_date (string, format 'YYYY-MM-DD')
+- project_duration (string, in weeks)
+- land_mile (string, lane miles)
+- width (string, in feet)
+- project_area (string, in square feet)
+- material_type (string, primary material, e.g., 'asphalt', 'concrete')
+- tonnage (string, total tonnage for asphalt or aggregate)
+- project_scope (string)
+- project_requirements (string)
+- quantities (array of objects with 'material', 'quantity', 'unit')
+
+Example:
+Text: "RFP #4: Residential Driveway & Sidewalk Replacement
+PROJECT TITLE: Fox Hollow Estates – Driveway & Sidewalk Rehabilitation
+PROJECT LOCATION: Fox Hollow Estates Subdivision, Lot #15–#28, Boulder City, NV
+SCHEDULE: All work completed by August 15, 2025
+ESTIMATED QUANTITIES: HMA driveway: 3,200 ft² × 0.333 ft ≈ 40 yd³; Concrete sidewalk: 1,800 ft² × 0.333 ft ≈ 22 yd³
+SCOPE OF WORK: Remove existing driveway pavement; install 4” HMA surface..."
+
+Output:
+{
+  "project_name": "Fox Hollow Estates – Driveway & Sidewalk Rehabilitation",
+  "project_type": "sidewalk",
+  "project_location": "Fox Hollow Estates Subdivision, Lot #15–#28, Boulder City, NV",
+  "completion_date": "2025-08-15",
+  "project_duration": "6",
+  "land_mile": "",
+  "width": "",
+  "project_area": "5000",
+  "material_type": "asphalt",
+  "tonnage": "80",
+  "project_scope": "Remove existing driveway pavement; install 4” HMA surface...",
+  "project_requirements": "",
+  "quantities": [
+    {"material": "asphalt", "quantity": 80, "unit": "tons"},
+    {"material": "concrete", "quantity": 22, "unit": "yd³"}
+  ]
+}
 
 Text:
 \"\"\"%s\"\"\"
-""" % text[:3500]  # Send up to 3500 chars for context
+
+Return the JSON object. Ensure dates are in 'YYYY-MM-DD' format. For project_type, infer from keywords (e.g., 'driveway' or 'sidewalk' implies 'sidewalk', 'lane' implies 'road'). If quantities are in ft³, convert to yd³ (divide by 27) or tons (use 150 lbs/ft³ for asphalt/concrete, 2000 lbs/ton). Limit scope and requirements to 1000 characters each.
+""" % text[:3500]
 
     try:
+        # Call OpenAI API
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=0.2,
+            max_tokens=1500
         )
         content = response.choices[0].message.content.strip()
-        # Try to extract JSON from code block if present
         json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
         if json_match:
             content = json_match.group(1)
         data = json.loads(content)
+        
+        # Validate and clean data
+        for key in ['project_name', 'project_location', 'project_scope', 'project_requirements']:
+            if key in data and data[key]:
+                data[key] = data[key][:255] if key in ['project_name', 'project_location'] else data[key][:1000]
+        if 'completion_date' in data and data['completion_date']:
+            try:
+                data['completion_date'] = parse_date(data['completion_date']).strftime('%Y-%m-%d')
+            except:
+                data['completion_date'] = ''
+        
         return data
     except Exception as e:
-        app.logger.error(f"OpenAI GPT extraction failed: {str(e)}\nRaw output: {content if 'content' in locals() else ''}")
         return {}
 
+# Handle RFP file upload
 @app.route('/upload_rfp', methods=['POST'])
 def upload_rfp():
+    """Process uploaded RFP files (PDF or DOCX) and generate project estimates."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
     file = request.files['file']
@@ -422,6 +611,7 @@ def upload_rfp():
         filename = file.filename.lower()
         file_data = file.read()
         file_stream = BytesIO(file_data)
+        # Extract text based on file type
         if filename.endswith('.pdf'):
             text = extract_text_from_pdf(file_stream)
         elif filename.endswith('.docx'):
@@ -429,10 +619,12 @@ def upload_rfp():
         else:
             return jsonify({'error': 'Unsupported file type'}), 400
 
-        # Always use OpenAI extraction for robustness
+        # Try OpenAI GPT extraction first, fall back to regex
         extracted_data = extract_fields_with_openai(text)
+        if not extracted_data:
+            extracted_data = extract_rfp_data(text)
 
-        # Set defaults for any missing required fields
+        # Set default values for missing fields
         if not extracted_data.get('project_name'):
             extracted_data['project_name'] = f"Project from {file.filename}"
         if not extracted_data.get('project_type'):
@@ -442,21 +634,30 @@ def upload_rfp():
         if not extracted_data.get('project_scope'):
             extracted_data['project_scope'] = 'Scope not extracted'
 
-        # Calculate area if land-mile/width provided but no area
+        # Calculate area if not provided
         if not extracted_data.get('project_area') and extracted_data.get('land_mile') and extracted_data.get('width'):
             try:
                 land_mile = float(extracted_data['land_mile'])
                 width_ft = float(extracted_data['width'])
                 if land_mile > 0 and width_ft > 0:
-                    extracted_data['project_area'] = str(round(land_mile * 5280 * width_ft))
+                    extracted_data['project_area'] = str(round((land_mile * 5280) * width_ft))
             except (ValueError, TypeError):
                 pass
 
-        # Validate we have area
+        if not extracted_data.get('project_area'):
+            # Sum areas from quantities if available
+            total_area = 0
+            if extracted_data.get('quantities'):
+                for q in extracted_data['quantities']:
+                    if q['unit'] in ['ft²', 'sq ft'] and q['quantity'] > 0:
+                        total_area += float(q['quantity'])
+                if total_area > 0:
+                    extracted_data['project_area'] = str(total_area)
+
         if not extracted_data.get('project_area'):
             return jsonify({
                 'error': 'Could not determine project area. Please provide area or land-mile+width in the document.',
-                'extracted_data': extracted_data  # For debugging
+                'extracted_data': extracted_data
             }), 400
 
         # Prepare data for processing
@@ -472,79 +673,68 @@ def upload_rfp():
             'material_type': extracted_data.get('material_type', 'asphalt'),
             'tonnage': extracted_data.get('tonnage', ''),
             'project_scope': extracted_data.get('project_scope'),
-            'project_requirements': extracted_data.get('project_requirements', '')
+            'project_requirements': extracted_data.get('project_requirements', ''),
+            'quantities': extracted_data.get('quantities', [])
         }
 
-        # Pass to calculation phase
         return process_estimate(data)
 
     except Exception as e:
-        app.logger.error(f"RFP processing failed: {str(e)}")
         return jsonify({
             'error': 'RFP processing failed',
             'details': str(e)
         }), 500
 
 
+# Process project estimate
 def process_estimate(data):
-    app.logger.info(f"Starting estimate processing with data: {data}")
+    """Generate project estimate based on input data, including labor, materials, and financials."""
 
+    # Helper function to safely convert values to float
     def safe_float(value, default=0.0):
-        if not value or not str(value).strip():
+        if not value or not str(value).strip() or str(value).lower() == "undefined":
             return default
-        # Remove commas and non-numeric (except dot and minus) characters
-        cleaned = re.sub(r'[^\d\.\-]', '', str(value))
         try:
+            cleaned = re.sub(r'[^\d.\-]', '', str(value))
             return float(cleaned)
         except ValueError:
             return default
 
     try:
-        # Extract project details
+        # Extract and validate input data
         project_name = data.get('project_name', 'Unnamed Project')
         project_type = data.get('project_type', 'road')
         location = data.get('project_location', 'Unknown Location')
         scope = data.get('project_scope', '')
-        if not scope or not scope.strip():
-            scope = 'Scope not provided'
         project_requirements = data.get('project_requirements', '')
-        if not project_requirements:
-            project_requirements = ''
-        material_type = data.get('material_type', 'asphalt')
-        # Truncate material_type to 50 chars to fit DB column
-        material = db.Column(db.String(150), nullable=False)
-        tonnage = safe_float(data.get('tonnage'))
+        material_type = data.get('material_type', 'asphalt').lower()
+        tonnage = safe_float(data.get('tonnage', 0))
         
-        land_mile = safe_float(data.get('land_mile'))
-        width_ft = safe_float(data.get('width'))
-        area_sqft = safe_float(data.get('project_area'))
+        land_mile = safe_float(data.get('land_mile', 0))
+        width_ft = safe_float(data.get('width', 0))
+        area_sqft = safe_float(data.get('project_area', 0))
         
-        # Calculate area if land-mile/width provided
+        # Calculate area if not provided
         if area_sqft <= 0:
             if land_mile > 0 and width_ft > 0:
-                area_sqft = land_mile * 5280 * width_ft
+                area_sqft = (land_mile * 5280) * width_ft
             else:
                 return jsonify({
-                    'error': 'Valid area required: Provide either area or land-mile+width'
+                    'error': 'Valid area required: Provide either area or land-mile+width',
+                    'details': f"land_mile: {land_mile}, width: {width_ft}, calculated_area: {area_sqft}"
                 }), 400
         
-        # Validate we have valid area
-        if area_sqft <= 0:
-            app.logger.error(f"Invalid area calculation: land_mile={land_mile}, width={width_ft}, area_sqft={area_sqft}")
-            return jsonify({
-                'error': 'Valid area required: Provide either area or land-mile+width',
-                'details': f"land_mile: {land_mile}, width: {width_ft}, calculated_area: {area_sqft}"
-            }), 400
-
-
-        # Handle completion date and duration
+        # Set default material type if not recognized
+        if material_type not in ['asphalt', 'recycled asphalt', 'bituminous surface', 'concrete', 'sealcoat']:
+            material_type = 'asphalt'
+        
+        # Determine project duration and completion date
         completion_date_str = data.get('completion_date', '')
-        duration_weeks = safe_float(data.get('project_duration', '0'))
+        duration_weeks = safe_float(data.get('project_duration', 0))
         
         if completion_date_str:
             try:
                 completion_date = datetime.strptime(completion_date_str, '%Y-%m-%d')
-                # Calculate duration based on completion date
                 today = datetime.now()
                 duration_weeks = max((completion_date - today).days / 7, 1)
             except:
@@ -552,32 +742,27 @@ def process_estimate(data):
                 duration_weeks = 8
         else:
             if duration_weeks <= 0:
-                duration_weeks = 8
+                duration_weeks = 8  # Default duration
             completion_date = datetime.now() + timedelta(weeks=duration_weeks)
         
-        # Material calculations
-        material_estimates = calculate_materials(
-            area_sqft, 
-            material_type, 
-            tonnage
-        )
+        # Calculate estimates with detailed logging
+        material_estimates = calculate_materials(area_sqft, material_type, tonnage)
         
-        # Labor calculations
-        labor_estimates = calculate_labor(area_sqft, duration_weeks, project_type)
+        labor_estimates = calculate_labor(area_sqft, duration_weeks, project_type, material_type, width_ft)
         
-        # Equipment calculations
         equipment_estimates = calculate_equipment(area_sqft, duration_weeks)
         
-        # Financial calculations
         financial_summary = calculate_financials(
             material_estimates, 
             labor_estimates, 
             equipment_estimates,
             area_sqft,
-            duration_weeks
+            duration_weeks,
+            material_type,
+            project_type=data.get('project_type', 'road')
         )
         
-        # Project summary
+        # Prepare project summary
         project_summary = {
             'project_name': project_name,
             'project_type': project_type.capitalize(),
@@ -585,13 +770,15 @@ def process_estimate(data):
             'completion_date': completion_date.strftime('%Y-%m-%d'),
             'duration_weeks': duration_weeks,
             'area_sqft': round(area_sqft),
-            'material_type': material_type.capitalize()
+            'material_type': material_type.capitalize(),
+            'land_mile': land_mile,
+            'width': width_ft,
+            'tonnage': tonnage 
         }
         
-        # Success probability based on project factors
         success_probability = calculate_success_probability(project_type, area_sqft, duration_weeks)
         
-        # Save project to database
+        # Create new project record
         new_project = Project(
             name=project_name,
             type=project_type.capitalize(),
@@ -608,30 +795,30 @@ def process_estimate(data):
             scope=scope,
             requirements=project_requirements,
             estimated_cost=f"${financial_summary['total_cost']}",
-            profit_margin=financial_summary['profit_margin'],
+            profit_margin=financial_summary['profit_margin_value'],
             success_probability=success_probability,
             asphalt_tons=material_estimates.get('asphalt_tons', 0),
             concrete_yds=material_estimates.get('concrete_yds', 0),
+            bituminous_tons=material_estimates.get('bituminous_tons', 0),
+            sealcoat_sqft=material_estimates.get('sealcoat_sqft', 0),
             rebar_lbs=material_estimates.get('rebar_lbs', 0),
             aggregate_tons=material_estimates.get('aggregate_tons', 0),
-            management_hours=labor_estimates['management_hours'],
-            prep_hours=labor_estimates['prep_hours'],
-            paving_hours=labor_estimates['paving_hours'],
-            finishing_hours=labor_estimates['finishing_hours']
+            management_hours=labor_estimates.get('management_hours', 0),
+            prep_hours=labor_estimates.get('prep_hours', 0),
+            paving_hours=labor_estimates.get('paving_hours', 0),
+            finishing_hours=labor_estimates.get('finishing_hours', 0),
+            cost_breakdown=financial_summary['cost_breakdown']
         )
         
+        # Save to database
         try:
             db.session.add(new_project)
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            app.logger.error(f"Database error details: {str(e)}")
-            # Print the exact SQL error if available
-            import traceback
-            app.logger.error(traceback.format_exc())
             return jsonify({
                 'error': 'Database operation failed',
-                'details': str(e)
+                'details': str(e),
             }), 500
 
         # Prepare response
@@ -642,269 +829,303 @@ def process_estimate(data):
             'equipment_estimates': equipment_estimates,
             'financial_summary': financial_summary,
             'success_probability': success_probability,
-            'project_id': new_project.id  # Make sure this is included
+            'project_id': new_project.id
         }
         
         return jsonify(response), 200
     
     except Exception as e:
-        app.logger.error(f"Estimate calculation failed: {str(e)}")
-        # RETURN 500 WITH ERROR DETAILS
         return jsonify({
-            'error': 'Estimate calculation failed',
-            'details': str(e)
+            'error': 'Estimate processing failed',
+            'details': str(e),
         }), 500
+    
 
-# Existing estimate calculation endpoint
+# Calculate Profit based on Project type and its size
+def calculate_profit_margin(project_type, area_sqft):
+    """Calculate dynamic profit margin based on project type and size"""
+    margins = PROFIT_MARGINS.get(project_type.lower(), PROFIT_MARGINS['road'])
+    
+    # Adjust based on project size (Virginia standards)
+    if area_sqft < 10000:       # Small project
+        return margins['max']
+    elif area_sqft < 100000:    # Medium project
+        return (margins['min'] + margins['max']) / 2
+    else:                       # Large project
+        return margins['min']
+
+
+# Handle manual estimate calculation via JSON
 @app.route('/calculate_estimate', methods=['POST'])
 def calculate_estimate():
     data = request.json
     return process_estimate(data)
 
+# Calculate material quantities
 def calculate_materials(area_sqft, material_type, tonnage):
-    """Calculate materials for various pavement types using DC rates and specs."""
-
-    # Constants (define these at the module level)
-    ASPHALT_THICKNESS = 0.33  # default 4 inches
-    ASPHALT_DENSITY = 145     # lbs per cubic foot
-    CONCRETE_THICKNESS = 0.5  # default 6 inches
-
-    material_type = material_type.lower().strip()
-    results = {}
-
-    if material_type in ['asphalt', 'bituminous surface', 'recycled asphalt']:
-        if tonnage > 0:
-            asphalt_tons = tonnage
-        else:
-            thickness = ASPHALT_THICKNESS
-            if material_type == 'bituminous surface':
-                thickness = 0.17  # 2 inches
-            elif material_type == 'recycled asphalt':
-                thickness = 0.25  # 3 inches
-            volume_cf = area_sqft * thickness
-            asphalt_tons = (volume_cf * ASPHALT_DENSITY) / 2000
+    try:
+        material_type = material_type.lower()
+        results = {}
         
-        results['asphalt_tons'] = round(asphalt_tons, 1)
-        results['aggregate_tons'] = round(asphalt_tons * 1.25, 1)  # DC-adjusted base material
-        results['rebar_lbs'] = round(area_sqft * 0.6)
-        results['emulsion_gal'] = round(area_sqft * 0.06, 1)
-        results['sealcoat_sqft'] = round(area_sqft)
-        results['thermoplastic_strip_ft'] = round(area_sqft / 10)
-
-    elif material_type in ['concrete', 'sidewalk', 'pavers']:
-        thickness = CONCRETE_THICKNESS
-        if material_type == 'sidewalk':
-            thickness = 0.33  # 4 inches
-        elif material_type == 'pavers':
-            thickness = 0.17  # 2 inches
-
-        volume_cf = area_sqft * thickness
-        concrete_yds = volume_cf / 27
-        results['concrete_yds'] = round(concrete_yds, 1)
-        results['rebar_lbs'] = round(area_sqft * 1.4)
-        results['aggregate_tons'] = round(concrete_yds * 1.6 * 1.25, 1)
-        results['formwork_sqft'] = round(area_sqft * 1.15)
-        if material_type == 'pavers':
-            results['pavers_sqft'] = round(area_sqft)
-
-    elif material_type == 'aggregate base':
-        thickness = 0.5  # 6 inches
-        volume_cf = area_sqft * thickness
-        aggregate_tons = (volume_cf * 110) / 2000
-        results['aggregate_tons'] = round(aggregate_tons, 1)
-
-    elif material_type == 'subbase':
-        thickness = 0.67  # 8 inches
-        volume_cf = area_sqft * thickness
-        subbase_tons = (volume_cf * 110) / 2000
-        results['subbase_tons'] = round(subbase_tons, 1)
-
-    elif material_type == 'geotextile':
-        results['geotextile_sqyd'] = round(area_sqft / 9, 1)
-
-    elif material_type == 'sealcoat':
-        results['sealcoat_sqft'] = round(area_sqft)
-
-    elif material_type == 'thermoplastic striping':
-        results['thermoplastic_strip_ft'] = round(area_sqft / 10)
-
-    elif material_type == 'curb':
-        results['curb_ft'] = round(area_sqft / 5)
-
-    elif material_type == 'drainage pipe':
-        results['drainage_pipe_ft'] = round(area_sqft / 100)
-
-    elif material_type == 'stormwater structure':
-        results['stormwater_structures'] = max(1, round(area_sqft / 20000))
-
-    else:
-        # Default fallback to asphalt
-        return calculate_materials(area_sqft, 'asphalt', tonnage)
-
-    return results
-
-
-# Updated labor calculations
-def calculate_labor(area_sqft, duration_weeks, project_type):
-    # DC-specific labor rates and productivity
-    if "road" in project_type.lower():
-        base_hours = 60  # hours per 1000 sq ft (includes prep, paving, finishing)
-    else:
-        base_hours = 75  # hours per 1000 sq ft for non-road projects
+        # Asphalt types
+        if material_type in ['asphalt', 'recycled asphalt']:
+            density = RECYCLED_DENSITY if 'recycled' in material_type else ASPHALT_DENSITY
+            thickness = THICKNESS.get(material_type, THICKNESS['asphalt'])
+            
+            if tonnage > 0:
+                asphalt_tons = tonnage
+            else:
+                volume_cf = area_sqft * thickness
+                asphalt_tons = (volume_cf * density) / 2000
+            
+            results['asphalt_tons'] = round(asphalt_tons, 1)
+            results['aggregate_tons'] = round(asphalt_tons * 1.2, 1)
+        
+        # Bituminous surface
+        elif material_type == 'bituminous surface':
+            density = MATERIAL_CONSTANTS['bituminous surface']['density']
+            thickness = MATERIAL_CONSTANTS['bituminous surface']['thickness']
+            
+            if tonnage > 0:
+                bituminous_tons = tonnage
+            else:
+                volume_cf = area_sqft * thickness
+                bituminous_tons = (volume_cf * density) / 2000
+            
+            results['bituminous_tons'] = round(bituminous_tons, 1)
+            results['aggregate_tons'] = round(bituminous_tons * 1.2, 1)
+        
+        # Concrete
+        elif material_type == 'concrete':
+            thickness = THICKNESS['concrete']
+            volume_cf = area_sqft * thickness
+            concrete_yds = volume_cf / 27
+            results['concrete_yds'] = round(concrete_yds, 1)
+            results['rebar_lbs'] = round(area_sqft * 1.2, 1)  # 1.2 lbs per sq ft
+        
+        # Sealcoat
+        elif material_type == 'sealcoat':
+            results['sealcoat_sqft'] = round(area_sqft)
+        
+        return results
     
-    # Add 20% premium for DC urban projects
-    total_hours = (area_sqft / 1000) * base_hours * 1.20
-    
-    # Distribute hours across phases
-    management_hours = total_hours * 0.12
-    prep_hours = total_hours * 0.30
-    paving_hours = total_hours * 0.40
-    finishing_hours = total_hours * 0.18
-    
-    return {
-        'management_hours': round(management_hours),
-        'prep_hours': round(prep_hours),
-        'paving_hours': round(paving_hours),
-        'finishing_hours': round(finishing_hours),
-        'total_hours': round(total_hours)
-    }
+    except Exception as e:
+        # Just raise the exception without logging
+        raise
 
+# Calculate labor hours
+def calculate_labor(area_sqft, duration_weeks, project_type, material_type, width_ft):
+    """Calculate labor hours for a 7-person crew based on Virginia productivity rates."""
+    try:
+        # Set default width
+        width_ft = width_ft or 0
+        
+        # Determine if project is a narrow path (width ≤ 3 ft)
+        is_narrow = width_ft > 0 and width_ft <= 3
+        
+        # Set productivity rate based on project type and material
+        if "road" in project_type.lower():
+            if is_narrow and "concrete" in material_type.lower():
+                sqft_per_crew_hour = 300  # Higher rate for narrow concrete paths
+            else:
+                sqft_per_crew_hour = 200  # Standard rate for asphalt/concrete roads
+        elif "sidewalk" in project_type.lower():
+            sqft_per_crew_hour = 150  # Rate for detailed sidewalk work
+        else:
+            sqft_per_crew_hour = 120  # General paving projects
+        
+        # Define crew size and weekly capacity
+        CREW_SIZE = 7  # Standard crew size for small Virginia projects
+        HOURS_PER_WORKER_PER_WEEK = 40  # Standard work week
+        max_weekly_hours = CREW_SIZE * HOURS_PER_WORKER_PER_WEEK  # 280 hours/week
+        
+        # Calculate total crew hours
+        total_crew_hours = area_sqft / sqft_per_crew_hour
+        
+        # Cap hours based on crew capacity and duration
+        if duration_weeks > 0:
+            max_total_hours = max_weekly_hours * duration_weeks
+            total_crew_hours = min(total_crew_hours, max_total_hours)
+        
+        # Ensure minimum hours for small projects
+        total_crew_hours = max(total_crew_hours, CREW_SIZE * 8)  # Minimum 56 hours
+        
+        # Set phase distribution percentages
+        if is_narrow:
+            management_pct = 0.10  # 10% for management
+            prep_pct = 0.20       # 20% for minimal site prep
+            paving_pct = 0.65     # 65% for main paving work
+            finishing_pct = 0.05  # 5% for minimal finishing
+        else:
+            management_pct = 0.10  # Standard VDOT distribution
+            prep_pct = 0.30
+            paving_pct = 0.50
+            finishing_pct = 0.10
+        
+        # Distribute hours across phases
+        management_hours = total_crew_hours * management_pct
+        prep_hours = total_crew_hours * prep_pct
+        paving_hours = total_crew_hours * paving_pct
+        finishing_hours = total_crew_hours * finishing_pct
+        
+        # Return rounded hours
+        return {
+            'management_hours': round(management_hours),
+            'prep_hours': round(prep_hours),
+            'paving_hours': round(paving_hours),
+            'finishing_hours': round(finishing_hours),
+            'total_hours': round(total_crew_hours)
+        }
+    
+    except Exception as e:
+        raise
+
+# Calculate equipment needs
 def calculate_equipment(area_sqft, duration_weeks):
-    # Calculate equipment needs based on DC productivity standards
-    pavers = max(1, math.ceil(area_sqft / 80000))  # 1 paver per 80,000 sq ft
-    rollers = max(1, math.ceil(area_sqft / 40000))  # 1 roller per 40,000 sq ft
-    excavators = 1 if area_sqft < 150000 else 2
-    trucks = max(2, math.ceil(area_sqft / 30000))  # 1 truck per 30,000 sq ft
-    
-    # Updated DC equipment rental rates ($/week)
-    paver_cost = pavers * 2200 * duration_weeks
-    roller_cost = rollers * 950 * duration_weeks
-    excavator_cost = excavators * 1800 * duration_weeks
-    truck_cost = trucks * 850 * duration_weeks
-    
-    return {
-        'pavers': pavers,
-        'rollers': rollers,
-        'excavators': excavators,
-        'trucks': trucks,
-        'paver_cost': round(paver_cost),
-        'roller_cost': round(roller_cost),
-        'excavator_cost': round(excavator_cost),
-        'truck_cost': round(truck_cost)
-    }
+    """Calculate equipment quantities and costs based on Virginia rental rates."""
+    try:
+        pavers = max(1, math.ceil(area_sqft / 120000))
+        rollers = max(1, math.ceil(area_sqft / 60000))
+        excavators = max(1, math.ceil(area_sqft / 150000))
+        trucks = max(2, math.ceil(area_sqft / 50000))
+        
+        paver_cost = pavers * 2500 * duration_weeks
+        roller_cost = rollers * 1000 * duration_weeks
+        excavator_cost = excavators * 2000 * duration_weeks
+        truck_cost = trucks * 900 * duration_weeks
 
-def calculate_financials(materials, labor, equipment, area_sqft, duration_weeks):
-    """Calculate financial summary based on all estimates and material types"""
-    material_costs = 0
+        return {
+            'pavers': pavers,
+            'rollers': rollers,
+            'excavators': excavators,
+            'trucks': trucks,
+            'paver_cost': round(paver_cost),
+            'roller_cost': round(roller_cost),
+            'excavator_cost': round(excavator_cost),
+            'truck_cost': round(truck_cost)
+        }
+    
+    except Exception as e:
+        raise
 
-    # Loop through all material keys and sum costs
-    for key, qty in materials.items():
-        if key.endswith('_tons'):
-            base = 'asphalt' if 'asphalt' in key else 'aggregate base'
-            unit_cost = MATERIAL_UNIT_COSTS.get(base, 100)
-            material_costs += qty * unit_cost * MATERIAL_MARKUP
-        elif key == 'concrete_yds':
-            material_costs += qty * MATERIAL_UNIT_COSTS['concrete'] * MATERIAL_MARKUP
-        elif key == 'rebar_lbs':
-            material_costs += qty * MATERIAL_UNIT_COSTS['rebar'] / 100  # per 100 lbs
-        elif key == 'emulsion_gal':
-            material_costs += qty * MATERIAL_UNIT_COSTS['emulsion']
-        elif key == 'sealcoat_sqft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['sealcoat']
-        elif key == 'thermoplastic_strip_ft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['thermoplastic striping']
-        elif key == 'curb_ft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['curb']
-        elif key == 'sidewalk_sqft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['sidewalk']
-        elif key == 'pavers_sqft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['pavers']
-        elif key == 'geotextile_sqyd':
-            material_costs += qty * MATERIAL_UNIT_COSTS['geotextile']
-        elif key == 'drainage_pipe_ft':
-            material_costs += qty * MATERIAL_UNIT_COSTS['drainage pipe']
-        elif key == 'stormwater_structures':
-            material_costs += qty * MATERIAL_UNIT_COSTS['stormwater structure']
-        elif key == 'subbase_tons':
-            material_costs += qty * MATERIAL_UNIT_COSTS['subbase']
-        # Add more as needed
 
-    # Labor costs
-    labor_costs = labor['total_hours'] * LABOR_RATE
-    
-    # Equipment costs
-    equipment_costs = (
-        equipment['paver_cost'] + 
-        equipment['roller_cost'] + 
-        equipment['excavator_cost'] + 
-        equipment['truck_cost']
-    ) * EQUIPMENT_RATE_MULTIPLIER
-    
-    # Subtotal costs
-    subtotal = material_costs + labor_costs + equipment_costs
-    
-    # Additional costs
-    overhead = subtotal * OVERHEAD_RATE
-    profit = subtotal * PROFIT_MARGIN
-    
-    # Total cost
-    total_cost = subtotal + overhead + profit
-    
-    # Cost breakdown
-    cost_breakdown = {
-        'materials': round(material_costs),
-        'labor': round(labor_costs),
-        'equipment': round(equipment_costs),
-        'overhead': round(overhead),
-        'profit': round(profit)
-    }
-    
-    # Cost per sq ft
-    cost_per_sqft = total_cost / area_sqft if area_sqft > 0 else 0
-    
-    return {
-        'total_cost': round(total_cost),
-        'cost_per_sqft': round(cost_per_sqft, 2),
-        'profit_margin': f"{PROFIT_MARGIN * 100}%",
-        'cost_breakdown': cost_breakdown
-    }
+# Calculate financial summary
+def calculate_financials(materials, labor, equipment, area_sqft, duration_weeks, material_type, project_type):
+    try:
+        # Get current market rates
+        LABOR_RATE = get_market_rate('LABOR_RATE', 62.50)
+        MATERIAL_MARKUP = 1.15  # Not a market rate, remains fixed
+        
+        material_costs = 0
+        material_type = material_type.lower()
+        
+        if material_type in ['asphalt', 'recycled asphalt', 'bituminous surface']:
+            if material_type == 'recycled asphalt':
+                unit_cost = get_market_rate('RECYCLED_ASPHALT_COST', 85)
+            elif material_type == 'bituminous surface':
+                unit_cost = get_market_rate('BITUMINOUS_SURFACE_COST', 120)
+            else:
+                unit_cost = get_market_rate('ASPHALT_UNIT_COST', 110)
+                
+            asphalt_tons = materials.get('asphalt_tons', 0)
+            material_costs += asphalt_tons * unit_cost * MATERIAL_MARKUP
+            
+            aggregate_tons = materials.get('aggregate_tons', 0)
+            aggregate_cost = get_market_rate('AGGREGATE_BASE_COST', 42)
+            material_costs += aggregate_tons * aggregate_cost * MATERIAL_MARKUP
+        
+        elif material_type == 'concrete':
+            unit_cost = get_market_rate('CONCRETE_UNIT_COST', 170)
+            concrete_yds = materials.get('concrete_yds', 0)
+            material_costs += concrete_yds * unit_cost * MATERIAL_MARKUP
+            
+            rebar_lbs = materials.get('rebar_lbs', 0)
+            rebar_cost = get_market_rate('REBAR_UNIT_COST', 0.80)
+            material_costs += rebar_lbs * rebar_cost * MATERIAL_MARKUP
+        
+        elif material_type == 'sealcoat':
+            unit_cost = get_market_rate('SEALCOAT_UNIT_COST', 0.55)
+            sealcoat_sqft = materials.get('sealcoat_sqft', area_sqft)
+            material_costs += sealcoat_sqft * unit_cost * MATERIAL_MARKUP    
 
+        # Calculate labor costs
+        labor_hours = labor.get('total_hours', 0)
+        if labor_hours <= 0:
+            # Fallback calculation if labor hours not provided
+            labor_hours = area_sqft / 100 * 10  # 10 hours per 100 sq ft
+        labor_costs = labor_hours * LABOR_RATE
+        
+        # Calculate equipment costs with markup
+        equipment_costs = (
+            equipment.get('paver_cost', 0) + 
+            equipment.get('roller_cost', 0) + 
+            equipment.get('excavator_cost', 0) + 
+            equipment.get('truck_cost', 0)
+        ) * EQUIPMENT_RATE_MULTIPLIER
+        
+        profit_margin = calculate_profit_margin(project_type, area_sqft)
+        
+        # Calculate subtotal, overhead, and profit
+        subtotal = material_costs + labor_costs + equipment_costs
+        overhead = subtotal * OVERHEAD_RATE
+        profit = subtotal * profit_margin
+        total_cost = subtotal + overhead + profit
+        
+        # Prepare cost breakdown
+        cost_breakdown = {
+            'materials': round(material_costs),
+            'labor': round(labor_costs),
+            'equipment': round(equipment_costs),
+            'overhead': round(overhead),
+            'profit': round(profit)
+        }
+        
+        cost_per_sqft = total_cost / area_sqft if area_sqft > 0 else 0
+        
+        return {
+            'total_cost': round(total_cost),
+            'profit_margin_value': profit_margin,
+            'profit_margin': f"{profit_margin * 100:.1f}%",  
+            'cost_per_sqft': round(cost_per_sqft, 2),
+            'cost_breakdown': cost_breakdown
+        }
+    
+    except Exception as e:
+        raise
+
+
+# Calculate bid success probability
 def calculate_success_probability(project_type, area_sqft, duration_weeks):
-    """Calculate probability of bid success based on project factors"""
-    base_prob = 70  # Base 70% probability
+    """Estimate probability of bid success based on project factors."""
+    base_prob = 75
     
-    # Adjust based on project type
-    if project_type == 'road':
+    if project_type.lower() == 'road':
         base_prob += 5
-    elif project_type == 'renovation':
-        base_prob -= 3
+    elif project_type.lower() == 'renovation':
+        base_prob -= 5
     
-    # Adjust based on project size
-    if area_sqft > 100000:
-        base_prob -= 10  # Large projects are more competitive
-    elif area_sqft < 10000:
-        base_prob += 5  # Small projects have less competition
-    
-    # Adjust based on duration
-    if duration_weeks > 26:  # >6 months
+    if area_sqft > 150000:
         base_prob -= 8
-    elif duration_weeks < 8:  # <2 months
+    elif area_sqft < 15000:
         base_prob += 5
     
-    # Ensure within bounds
-    probability = max(50, min(90, base_prob))
+    if duration_weeks > 24:
+        base_prob -= 7
+    elif duration_weeks < 6:
+        base_prob += 5
+    
+    probability = max(60, min(95, base_prob))
     
     return f"{probability}%"
 
 
-# Download Report  
+# Download project report as PDF
 @app.route('/download_report/<int:project_id>', methods=['GET'])
 def download_report(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     
-    # Create PDF report
     pdf = generate_pdf_report(project)
     
     response = make_response(pdf)
@@ -912,17 +1133,18 @@ def download_report(project_id):
     response.headers['Content-Disposition'] = f'attachment; filename=project_{project_id}_report.pdf'
     return response
 
+
+# Download project report as CSV
 @app.route('/download_report_csv/<int:project_id>', methods=['GET'])
 def download_report_csv(project_id):
-    project = db.session.get(Project, project_id)  # Updated
+    project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     
-    # Create CSV report
     si = StringIO()
     cw = csv.writer(si)
     
-    # Write CSV headers
+    # Write CSV content
     cw.writerow(['Project Report', f'Project ID: {project_id}'])
     cw.writerow([])
     cw.writerow(['Field', 'Value'])
@@ -933,18 +1155,52 @@ def download_report_csv(project_id):
     cw.writerow(['Status', project.status])
     cw.writerow(['Estimated Cost', project.cost])
     cw.writerow(['Completion Date', project.completion_date.strftime('%Y-%m-%d') if project.completion_date else ''])
+    cw.writerow(['Land-Mile', project.land_mile])
+    cw.writerow(['Width (ft)', project.width])
     cw.writerow(['Area (sq ft)', project.area])
-    cw.writerow(['Material', project.material])
-    cw.writerow(['Asphalt (tons)', project.asphalt_tons])
-    cw.writerow(['Concrete (yds)', project.concrete_yds])
-    cw.writerow(['Rebar (lbs)', project.rebar_lbs])
-    cw.writerow(['Aggregate (tons)', project.aggregate_tons])
+    
+    
+    material_type = project.material.lower()
+    cw.writerow([])
+    cw.writerow(['Material Estimates', 'Quantity'])
+    
+    if material_type == 'bituminous surface':
+        if hasattr(project, 'bituminous_tons') and project.bituminous_tons:
+            cw.writerow(['Bituminous Surface', f'{project.bituminous_tons} tons'])
+        if project.aggregate_tons:
+            cw.writerow(['Aggregate', f'{project.aggregate_tons} tons'])
+    elif 'asphalt' in material_type or 'bituminous' in material_type:
+        if project.asphalt_tons:
+            cw.writerow(['Asphalt', f'{project.asphalt_tons} tons'])
+        if project.aggregate_tons:
+            cw.writerow(['Aggregate', f'{project.aggregate_tons} tons'])
+    elif 'concrete' in material_type:
+        if project.concrete_yds:
+            cw.writerow(['Concrete', f'{project.concrete_yds} cubic yards'])
+        if project.rebar_lbs:
+            cw.writerow(['Rebar', f'{project.rebar_lbs} lbs'])
+    elif material_type == 'sealcoat':
+        if project.sealcoat_sqft:
+            cw.writerow(['Sealcoat', f'{project.sealcoat_sqft} sq ft'])
+
+
+    cw.writerow([])
+    cw.writerow(['Time Estimates'])
     cw.writerow(['Management Hours', project.management_hours])
     cw.writerow(['Preparation Hours', project.prep_hours])
     cw.writerow(['Paving Hours', project.paving_hours])
     cw.writerow(['Finishing Hours', project.finishing_hours])
-    cw.writerow(['Profit Margin', project.profit_margin])
+    cw.writerow([])
+    cw.writerow(['Cost Breakdown'])
+    cw.writerow(['Profit Margin', f"{(project.profit_margin * 100):.1f}%"])
+    cw.writerow(['Materials Cost', f"${project.cost_breakdown['materials']}"])
+    cw.writerow(['Labor Cost', f"${project.cost_breakdown['labor']}"])
+    cw.writerow(['Equipment Cost', f"${project.cost_breakdown['equipment']}"])
+    cw.writerow(['Overhead Cost', f"${project.cost_breakdown['overhead']}"])
+    # cw.writerow(['Profit', f"${project.cost_breakdown['profit']}"])
+    cw.writerow([])
     cw.writerow(['Success Probability', project.success_probability])
+    cw.writerow([])
     cw.writerow(['Scope', project.scope])
     cw.writerow(['Requirements', project.requirements or ''])
     
@@ -954,31 +1210,64 @@ def download_report_csv(project_id):
     return response
 
 
+# Generate PDF report
 def generate_pdf_report(project):
-    # Get current date for report
+    """Generate a styled PDF report for a project."""
     current_date = datetime.now().strftime('%B %d, %Y')
-    
-    # Read and encode logo (add your logo.png in static/images)
     logo_path = os.path.join(app.root_path, 'static', 'images', 'logo.png')
     logo_data = ""
     if os.path.exists(logo_path):
         with open(logo_path, "rb") as logo_file:
             logo_data = base64.b64encode(logo_file.read()).decode('utf-8')
     
+    profit_margin_percent = round(project.profit_margin * 100, 1)
+
+    material_rows = ""
+    material_type = project.material.lower()
+    
+    if material_type == 'bituminous surface':
+        if hasattr(project, 'bituminous_tons') and project.bituminous_tons:
+            material_rows += f"<tr><td>Bituminous Surface</td><td>{project.bituminous_tons} tons</td></tr>"
+        if project.aggregate_tons:
+            material_rows += f"<tr><td>Aggregate</td><td>{project.aggregate_tons} tons</td></tr>"
+    elif 'asphalt' in material_type or 'bituminous' in material_type:
+        if project.asphalt_tons:
+            material_rows += f"<tr><td>Asphalt</td><td>{project.asphalt_tons} tons</td></tr>"
+        if project.aggregate_tons:
+            material_rows += f"<tr><td>Aggregate</td><td>{project.aggregate_tons} tons</td></tr>"
+    elif 'concrete' in material_type:
+        if project.concrete_yds:
+            material_rows += f"<tr><td>Concrete</td><td>{project.concrete_yds} cubic yards</td></tr>"
+        if project.rebar_lbs:
+            material_rows += f"<tr><td>Rebar</td><td>{project.rebar_lbs} lbs</td></tr>"
+    elif material_type == 'sealcoat':
+        if project.sealcoat_sqft:
+            material_rows += f"<tr><td>Sealcoat</td><td>{project.sealcoat_sqft} sq ft</td></tr>"
+
+
+    # Define HTML content for PDF
     html_content = f"""
     <html>
     <head>
         <title>Project Report - {project.id}</title>
         <style>
-            /* Professional styling */
             @page {{ size: A4; margin: 1.5cm; }}
             body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; }}
             .header {{ border-bottom: 2px solid #3498db; padding-bottom: 15px; margin-bottom: 25px; }}
             h1 {{ color: #2c3e50; margin-bottom: 5px; }}
             h2 {{ color: #3498db; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-top: 25px; }}
             .subtitle {{ color: #7f8c8d; font-size: 1.1rem; }}
-            .project-info {{ background-color: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 30px; }}
-            .grid-container {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
+            .project-info {{
+                background-color: #f8f9fa;
+                border-radius: 8px;
+                padding: 25px;
+                margin-bottom: 35px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            }}
+            .grid-container {{ display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }}
+            .grid-container p {{
+                margin: 10px 0;
+            }}
             .section {{ margin-bottom: 25px; }}
             table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
             th {{ background-color: #3498db; color: white; text-align: left; padding: 12px; }}
@@ -998,10 +1287,9 @@ def generate_pdf_report(project):
             .status-rejected {{ background-color: #e74c3c; color: white; }}
             .header-logo-container {{ 
                 display: flex;
-                justify-content: center; /* Horizontal centering */
+                justify-content: center;
                 margin-bottom: 10px;
             }}
-            
             .logo-img {{ 
                 max-width: 100%; 
                 height: auto; 
@@ -1014,45 +1302,68 @@ def generate_pdf_report(project):
         <div class="header-logo-container">
             {"<img src='data:image/png;base64," + logo_data + "' class='logo-img'/>" if logo_data else ""}
         </div>
-
         <div class="header">
             <div class="logo">Bid<span>Master</span></div>
             <h1>Project Report: {project.name}</h1>
             <p class="subtitle">Generated on {current_date} | Project ID: {project.id}</p>
         </div>
-
-        
         <div class="project-info">
             <div class="grid-container">
                 <div>
                     <p><strong>Project Type:</strong> {project.type}</p>
                     <p><strong>Location:</strong> {project.location}</p>
-                    <p><strong>Submitted:</strong> {project.submitted.strftime('%Y-%m-%d')}</p>
+                    <p><strong>Land-mile:</strong> {project.land_mile} mile</p>
+                    <p><strong>Width:</strong> {project.width} ft</p>
+                    <p><strong>Area:</strong> {project.area} sq ft</p>
+                    <p><strong>Material:</strong> {project.material}</p>
+                </div>
+                <div>
+                    <p><strong>Estimated Cost:</strong> {project.cost}</p>
+                    <p><strong>Submitted on:</strong> {project.submitted.strftime('%Y-%m-%d')}</p>
+                    <p><strong>Completion Date:</strong> {project.completion_date.strftime('%Y-%m-%d') if project.completion_date else 'N/A'}</p>
+                    <p><strong>Tonnage:</strong> {project.tonnage} tons</p>
+                    <p><strong>Success Probability:</strong> {project.success_probability}</p>
                     <p><strong>Status:</strong> 
                         <span class="status-badge status-{project.status}">{project.status.capitalize()}</span>
                     </p>
                 </div>
-                <div>
-                    <p><strong>Estimated Cost:</strong> {project.cost}</p>
-                    <p><strong>Completion Date:</strong> {project.completion_date.strftime('%Y-%m-%d') if project.completion_date else 'N/A'}</p>
-                    <p><strong>Area:</strong> {project.area} sq ft</p>
-                    <p><strong>Material:</strong> {project.material}</p>
-                </div>
             </div>
         </div>
-        
         <div class="section">
             <h2>Financial Summary</h2>
             <table>
                 <tr>
-                    <td>Profit Margin</td>
-                    <td>{project.profit_margin}</td>
-                    <td>Success Probability</td>
-                    <td>{project.success_probability}</td>
+                    <td><strong>Estimated Cost:</strong></td>
+                    <td>{project.cost}</td>
                 </tr>
+                <tr>    
+                    <td><strong>Profit Margin:</strong></td>
+                    <td>{profit_margin_percent}%</td>
+                </tr>
+                <tr>
+                    <td><strong>Pricing Breakdown:</strong></td>
+                    <td>  
+                        <table>
+                            <tr>
+                                <td><strong>Materials:</strong></td>
+                                <td>${project.cost_breakdown['materials']}</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Labor:</strong></td>
+                                <td>${project.cost_breakdown['labor']}</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Equipment:</strong></td>
+                                <td>${project.cost_breakdown['equipment']}</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Overhead:</strong></td>
+                                <td>${project.cost_breakdown['overhead']}</td>
+                            </tr>
+                        </table>
+                    </td>
             </table>
         </div>
-        
         <div class="section">
             <h2>Resource Estimates</h2>
             <table>
@@ -1060,25 +1371,9 @@ def generate_pdf_report(project):
                     <th>Material</th>
                     <th>Quantity</th>
                 </tr>
-                <tr>
-                    <td>Asphalt</td>
-                    <td>{project.asphalt_tons} tons</td>
-                </tr>
-                <tr>
-                    <td>Concrete</td>
-                    <td>{project.concrete_yds} cubic yards</td>
-                </tr>
-                <tr>
-                    <td>Rebar</td>
-                    <td>{project.rebar_lbs} lbs</td>
-                </tr>
-                <tr>
-                    <td>Aggregate</td>
-                    <td>{project.aggregate_tons} tons</td>
-                </tr>
+                {material_rows}
             </table>
         </div>
-        
         <div class="section">
             <h2>Labor Estimates</h2>
             <table>
@@ -1087,37 +1382,35 @@ def generate_pdf_report(project):
                     <th>Hours</th>
                 </tr>
                 <tr>
-                    <td>Management</td>
+                    <td><strong>Management:</strong></td>
                     <td>{project.management_hours}</td>
                 </tr>
                 <tr>
-                    <td>Preparation</td>
+                    <td><strong>Preparation:</strong></td>
                     <td>{project.prep_hours}</td>
                 </tr>
                 <tr>
-                    <td>Paving</td>
+                    <td><strong>Paving:</strong></td>
                     <td>{project.paving_hours}</td>
                 </tr>
                 <tr>
-                    <td>Finishing</td>
+                    <td><strong>Finishing:</strong></td>
                     <td>{project.finishing_hours}</td>
                 </tr>
             </table>
         </div>
-        
+
         <div class="section">
             <h2>Project Scope</h2>
             <p>{project.scope}</p>
         </div>
-        
         <div class="section">
             <h2>Requirements</h2>
             <p>{project.requirements or 'No special requirements specified'}</p>
         </div>
-        
         <div class="footer">
             <p>Generated by Paveiq BidMaster System</p>
-            <p>&copy; {datetime.now().year} Paveiq. All rights reserved.</p>
+            <p>© {datetime.now().year} Paveiq. All rights reserved.</p>
         </div>
     </body>
     </html>
@@ -1127,6 +1420,6 @@ def generate_pdf_report(project):
     return HTML(string=html_content).write_pdf(font_config=font_config)
 
 
+# Main: Run the Flask app
 if __name__ == '__main__':
-    # app.run(debug=True, port=5000)
     app.run(host='0.0.0.0', port=5000, debug=False)
