@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Market Rates | BidMaster</title>
+  
+  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Open+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <style>
+    :root {
+      --primary: #1a2a3a;
+      --secondary: #f39c12;
+      --accent: #3498db;
+      --asphalt: #34495e;
+      --pavement: #7f8c8d;
+      --light-bg: #f5f7fa;
+      --card-gradient: linear-gradient(145deg, #ffffff, #f0f4f8);
+      --success: #27ae60;
+      --warning: #f39c12;
+      --danger: #e74c3c;
+    }
+    
+    body {
+      background: radial-gradient(circle at top right, #e0e7f0, #d1e0f0 40%, #e0e7f0 80%, #e0e7f0 100%);
+      min-height: 100vh;
+      margin: 0;
+      overflow-x: hidden;
+      font-family: 'Open Sans', sans-serif;
+      line-height: 1.6;
+      color: #2c3e50;
+    }
+
+    h1, h2, h3, h4, h5, .dashboard-title {
+      font-family: 'Montserrat', sans-serif;
+      font-weight: 600;
+    }
+
+    .card, .detail-card, .result-card {
+        font-family: 'Open Sans', sans-serif;
+    }
+    
+    .dashboard-header {
+      background: linear-gradient(120deg, var(--asphalt), var(--primary));
+      border-radius: 16px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      color: white;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .card {
+      background: var(--card-gradient);
+      border-radius: 16px;
+      box-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      border-left: 4px solid var(--secondary);
+      position: relative;
+      margin-bottom: 1.5rem;
+    }
+    
+    .glass-panel {
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(10px);
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    
+    .notification {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 1000;
+      animation: slideIn 0.5s ease, fadeOut 0.5s ease 2.5s forwards;
+      padding: 14px 20px;
+      border-radius: 10px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.95rem;
+    }
+    
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    
+    @keyframes fadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; visibility: hidden; }
+    }
+    
+    .btn {
+      padding: 12px 22px;
+      border-radius: 12px;
+      color: white;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.3s ease;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+      font-size: 0.95rem;
+    }
+    
+    .btn:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 6px 15px rgba(0,0,0,0.15);
+    }
+    
+    .btn-primary {
+      background: linear-gradient(to right, var(--asphalt), var(--primary));
+    }
+    
+    .btn-success {
+      background: linear-gradient(to right, var(--success), #2ecc71);
+    }
+    
+    .btn-danger {
+      background: linear-gradient(to right, var(--danger), #e67e22);
+    }
+
+    /* Market Rates Specific Styles */
+    .rate-item {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 16px 0;
+      transition: all 0.2s ease;
+    }
+    
+    .rate-item:hover {
+      background-color: #f8fafc;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    
+    .rate-info {
+      flex: 1 1 100%;
+      margin-bottom: 10px;
+    }
+    
+    .rate-info h4 {
+      font-weight: 600;
+      color: var(--asphalt);
+      margin-bottom: 4px;
+    }
+    
+    .rate-info p {
+      color: var(--pavement);
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+    
+    .rate-value {
+      flex: 1 1 100%;
+    }
+    
+    .rate-value input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #d1d8e0;
+      border-radius: 8px;
+      font-size: 1rem;
+      background-color: #fff;
+      transition: all 0.3s ease;
+    }
+    
+    .rate-value input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+    }
+    
+    .rate-value input[readonly] {
+      background-color: #f8fafc;
+      cursor: not-allowed;
+    }
+    
+    .rate-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
+      justify-content: flex-end;
+      width: 100%;
+    }
+    
+    .edit-mode .rate-value input {
+      background-color: #fff9e6;
+      border-color: var(--warning);
+    }
+    
+    /* Responsive adjustments */
+    @media (min-width: 768px) {
+      .rate-item {
+        flex-wrap: nowrap;
+      }
+      
+      .rate-info {
+        flex: 0 0 60%;
+        margin-bottom: 0;
+        padding-right: 20px;
+      }
+      
+      .rate-value {
+        flex: 0 0 40%;
+      }
+    }
+    
+    @media (max-width: 768px) {
+      .rate-actions {
+        flex-direction: column;
+        gap: 10px;
+      }
+      
+      .rate-actions .btn {
+        width: 100%;
+      }
+    }
+  </style>
+
+</head>
+<body>
+  <!-- Market Rates Management Page -->
+  <div id="market-rates">
+    <!-- Navigation -->
+    <nav class="bg-white shadow-lg fixed top-0 left-0 w-full z-10">
+      <div class="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center">
+        <a href="/admin/dashboard" class="flex items-center">
+          <div class="ai-icon mr-3">
+            <i class="fas fa-robot"></i>
+          </div>
+          <span class="font-bold text-xl text-gray-800">Bid<span class="text-orange-500">Master</span> <span class="text-sm text-gray-500">Paveiq</span></span>
+        </a>
+        <div class="flex gap-6 items-center">
+          <button id="back-to-dashboard" class="text-sm font-medium text-gray-700 hover:text-gray-900 transition-colors flex items-center">
+            <i class="fas fa-tachometer-alt mr-1"></i> 
+            Dashboard
+          </button>
+          <button id="admin-logout" class="text-sm font-medium text-red-600 hover:text-red-800 transition-colors flex items-center">
+            <i class="fas fa-sign-out-alt mr-1"></i> 
+            <a href="{{ url_for('admin_logout') }}">Logout</a>
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="pt-16 max-w-7xl mx-auto px-4 py-6">
+      <!-- Dashboard Header -->
+      <div class="dashboard-header">
+        <h1 class="dashboard-title font-bold">Market Rates Management</h1>
+        <p class="dashboard-subtitle">Update current market rates for materials and services</p>
+        <p class="dashboard-subtitle">All the rates are in USD ($)</p>
+      </div>
+      
+      <!-- Market Rates Card -->
+      <div class="card">
+        <div class="p-6">
+          <div id="rates-container">
+            {% for rate in market_rates %}
+            <div class="rate-item" data-name="{{ rate.name }}">
+              <div class="rate-info">
+                <h4>{{ rate.name }}</h4>
+                <p>{{ rate.description }}</p>
+              </div>
+              <div class="rate-value">
+                <input type="text" value="{{ rate.value }}" readonly>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          
+          <div class="rate-actions">
+            <button id="edit-rates" class="btn btn-primary">
+              <i class="fas fa-edit mr-2"></i> Edit Rates
+            </button>
+            <button id="update-rates" class="btn btn-success hidden">
+              <i class="fas fa-save mr-2"></i> Update Rates
+            </button>
+            <button id="cancel-edit" class="btn bg-gray-300 hover:bg-gray-400 text-gray-800 hidden">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div id="update-confirm-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden glass-panel">
+      <div class="p-6">
+        <div class="flex justify-center mb-4">
+          <i class="fas fa-question-circle text-3xl text-blue-500"></i>
+        </div>
+        <h3 class="text-xl font-bold text-center mb-2">Confirm Update</h3>
+        <p class="text-gray-600 text-center mb-6">Are you sure you want to update these market rates?</p>
+        <div class="flex justify-center gap-4">
+          <button id="cancel-update" class="btn bg-gray-300 hover:bg-gray-400 text-gray-800 px-6">
+            Cancel
+          </button>
+          <button id="confirm-update" class="btn btn-primary px-6">
+            <i class="fas fa-check mr-2"></i> Update
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Container -->
+  <div id="notificationContainer"></div>
+  
+  <div class="text-center text-sm text-gray-500 mt-8">
+    © 2025 Paveiq. Admin Restricted Access
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // DOM elements
+      const editBtn = document.getElementById('edit-rates');
+      const updateBtn = document.getElementById('update-rates');
+      const cancelBtn = document.getElementById('cancel-edit');
+      const container = document.getElementById('rates-container');
+      const confirmModal = document.getElementById('update-confirm-modal');
+      const cancelUpdateBtn = document.getElementById('cancel-update');
+      const confirmUpdateBtn = document.getElementById('confirm-update');
+      const backBtn = document.getElementById('back-to-dashboard');
+      const logoutBtn = document.getElementById('admin-logout');
+      
+      let isEditMode = false;
+      
+      // Back to dashboard
+      if (backBtn) {
+        backBtn.addEventListener('click', function() {
+          window.location.href = '/admin/dashboard';
+        });
+      }
+      
+      // Logout
+      if (logoutBtn) {
+        logoutBtn.addEventListener('click', function() {
+          window.location.href = "{{ url_for('admin_logout') }}";
+        });
+      }
+      
+      // Toggle edit mode
+      editBtn.addEventListener('click', function() {
+        isEditMode = true;
+        container.classList.add('edit-mode');
+        updateBtn.classList.remove('hidden');
+        cancelBtn.classList.remove('hidden');
+        editBtn.classList.add('hidden');
+        
+        // Make inputs editable
+        const inputs = container.querySelectorAll('input');
+        inputs.forEach(input => {
+          input.removeAttribute('readonly');
+          input.dataset.originalValue = input.value; // Store original value
+        });
+      });
+      
+      // Cancel edit
+      cancelBtn.addEventListener('click', function() {
+        resetEditMode();
+        
+        // Reset values to original
+        const inputs = container.querySelectorAll('input');
+        inputs.forEach(input => {
+          if (input.dataset.originalValue) {
+            input.value = input.dataset.originalValue;
+          }
+        });
+      });
+      
+      // Show update confirmation
+      updateBtn.addEventListener('click', function() {
+        confirmModal.classList.remove('hidden');
+      });
+      
+      // Cancel update
+      cancelUpdateBtn.addEventListener('click', function() {
+        confirmModal.classList.add('hidden');
+      });
+      
+      // Confirm update
+      confirmUpdateBtn.addEventListener('click', function() {
+        const ratesData = {};
+        const rateItems = container.querySelectorAll('.rate-item');
+        
+        rateItems.forEach(item => {
+          const name = item.dataset.name;
+          const value = item.querySelector('input').value;
+          ratesData[name] = value;
+        });
+        
+        // Send update request
+        fetch('/admin/market_rates/update', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(ratesData)
+        })
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            showNotification('Market rates updated successfully!', 'success');
+            resetEditMode();
+          } else {
+            showNotification('Failed to update rates', 'error');
+          }
+          confirmModal.classList.add('hidden');
+        })
+        .catch(() => {
+          showNotification('Error updating rates', 'error');
+          confirmModal.classList.add('hidden');
+        });
+      });
+      
+      // Helper function to reset edit mode
+      function resetEditMode() {
+        isEditMode = false;
+        container.classList.remove('edit-mode');
+        updateBtn.classList.add('hidden');
+        cancelBtn.classList.add('hidden');
+        editBtn.classList.remove('hidden');
+        
+        // Make inputs readonly
+        const inputs = container.querySelectorAll('input');
+        inputs.forEach(input => {
+          input.setAttribute('readonly', true);
+        });
+      }
+      
+      // Notification function
+      function showNotification(message, type) {
+        const container = document.getElementById('notificationContainer');
+        const notification = document.createElement('div');
+        
+        let bgColor = 'bg-blue-100 text-blue-800';
+        let icon = 'fa-info-circle';
+        if (type === 'error') {
+          bgColor = 'bg-red-100 text-red-800';
+          icon = 'fa-exclamation-circle';
+        } else if (type === 'success') {
+          bgColor = 'bg-green-100 text-green-800';
+          icon = 'fa-check-circle';
+        }
+        
+        notification.className = `notification ${bgColor}`;
+        notification.innerHTML = `
+          <i class="fas ${icon} text-lg"></i>
+          <p class="text-sm font-medium">${message}</p>
+        `;
+        
+        container.appendChild(notification);
+        setTimeout(() => notification.remove(), 3000);
+      }
+    });
+  </script>
+</body>
+</html>
