@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -558,7 +557,8 @@ document.addEventListener('DOMContentLoaded', function() {
         window.location.href = '/admin/market_rates';
       });
     }
-    
+
+
     // Logout
     function logout() {
         sessionStorage.setItem('logoutSuccess', 'true');
@@ -718,7 +718,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (projectDetail) projectDetail.classList.add('hidden');
                             if (adminDashboard) adminDashboard.classList.remove('hidden');
                             populateProjectsTable('pending');
-                        }, 1500);
+                        }, 1000);
                     }, 1000);
                 } else {
                     showNotification('Failed to accept project.', 'error');
@@ -756,7 +756,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (projectDetail) projectDetail.classList.add('hidden');
                             if (adminDashboard) adminDashboard.classList.remove('hidden');
                             populateProjectsTable('pending');
-                        }, 1500);
+                        }, 1000);
                     }, 1000);
                 } else {
                     showNotification('Failed to reject project.', 'error');
@@ -812,10 +812,10 @@ document.addEventListener('DOMContentLoaded', function() {
             credentials: 'same-origin'
         }).then(res => {
             if (res.ok) {
-                showNotification('Project deleted!', 'success');
-                // Remove row without redirecting
+                // Remove the row from the table without redirecting
                 const row = document.querySelector(`tr[data-id="${projectId}"]`);
                 if (row) row.remove();
+                showNotification('Project deleted!', 'success');
             } else {
                 showNotification('Failed to delete project.', 'error');
             }
