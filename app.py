@@ -33,7 +33,7 @@ client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))  # OpenAI API
 
 # Configure Flask app settings
 app.config['ENV'] = os.environ.get('FLASK_ENV', 'production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') + "?ssl_ca=global-bundle.pem"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)  # Initialize SQLAlchemy for database operations
 
