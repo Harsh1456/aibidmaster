@@ -1,3 +1,9 @@
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for, make_response
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, timedelta
+from flask_cors import CORS
+from dotenv import load_dotenv
+from urllib.parse import urlparse
 import pymysql
 import math
 import base64
@@ -5,12 +11,6 @@ import os
 import re
 import csv
 import json
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for, make_response
-from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime, timedelta
-from flask_cors import CORS
-from dotenv import load_dotenv
-from urllib.parse import urlparse
 from dateutil.parser import parse as parse_date
 import PyPDF2
 import openai
@@ -19,6 +19,7 @@ from docx import Document
 from io import BytesIO, StringIO
 from weasyprint import HTML
 from weasyprint.text.fonts import FontConfiguration
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -29,12 +30,13 @@ CORS(app)  # Enable Cross-Origin Resource Sharing
 app.secret_key = os.environ.get('SECRET_KEY')  # Set secret key for session management
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))  # OpenAI API
 
+
 # Configure Flask app settings
 app.config['ENV'] = os.environ.get('FLASK_ENV', 'production')
-
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+db = SQLAlchemy(app)  # Initialize SQLAlchemy for database operations
+
 
 # Admin credentials for dashboard access
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@aibidmaster.com')
@@ -87,12 +89,6 @@ PROFIT_MARGINS = {
     'renovation': {'min': 0.15, 'max': 0.22}
 }
 
-# Market Rates table
-class MarketRate(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
-    value = db.Column(db.Float, nullable=False)
-    description = db.Column(db.String(255), nullable=False)
 
 # Project Model: Defines the database schema for storing project details
 class Project(db.Model):
@@ -127,8 +123,12 @@ class Project(db.Model):
     cost_breakdown = db.Column(db.JSON)
 
 
-with app.app_context():
-    db.create_all()
+# Market Rates
+class MarketRate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    value = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String(255), nullable=False)
 
 
 # Serve the main index page
@@ -198,78 +198,6 @@ def admin_project_detail(project_id):
         return redirect(url_for('admin_dashboard'))
     
     return render_template('project_detail.html', project=project)
-
-
-# Market rates management page
-@app.route('/admin/market_rates', methods=['GET'])
-def market_rates_management():
-    if not session.get('admin_logged_in'):
-        return redirect(url_for('admin_login_page'))
-    
-    rates = MarketRate.query.all()
-    return render_template('market_rates.html', market_rates=rates)
-
-# Update market rates
-@app.route('/admin/market_rates/update', methods=['POST'])
-def update_market_rates():
-    if not session.get('admin_logged_in'):
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    data = request.json
-    for name, value in data.items():
-        rate = MarketRate.query.filter_by(name=name).first()
-        if rate:
-            try:
-                rate.value = float(value)
-            except ValueError:
-                return jsonify({'error': f'Invalid value for {name}'}), 400
-    
-    try:
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-# Initialize market rates if they don't exist
-def initialize_market_rates():
-    rates = [
-        {'name': 'ASPHALT_UNIT_COST', 'value': 110, 'description': 'Current market cost per ton of asphalt ($)'},
-        {'name': 'RECYCLED_ASPHALT_COST', 'value': 85, 'description': 'Current market cost per ton of recycled asphalt ($)'},
-        {'name': 'CONCRETE_UNIT_COST', 'value': 170, 'description': 'Current market cost per cubic yard of concrete ($)'},
-        {'name': 'BITUMINOUS_SURFACE_COST', 'value': 120, 'description': 'Current market cost per ton of bituminous surface ($)'},
-        {'name': 'SEALCOAT_UNIT_COST', 'value': 0.55, 'description': 'Current market cost per square foot of sealcoat ($)'},
-        {'name': 'REBAR_UNIT_COST', 'value': 0.80, 'description': 'Current market cost per pound of rebar ($)'},
-        {'name': 'AGGREGATE_BASE_COST', 'value': 42, 'description': 'Current market cost per ton of aggregate base ($)'},
-        {'name': 'LABOR_RATE', 'value': 62.50, 'description': 'Current market hourly labor rate ($/hour)'},
-    ]
-    
-    for rate_data in rates:
-        if not MarketRate.query.filter_by(name=rate_data['name']).first():
-            new_rate = MarketRate(
-                name=rate_data['name'],
-                value=rate_data['value'],
-                description=rate_data['description']
-            )
-            db.session.add(new_rate)
-    
-    db.session.commit()
-
-# Call this function after creating the database
-with app.app_context():
-    db.create_all()
-    initialize_market_rates()
-
-def get_market_rate(name, default=None):
-    rate = MarketRate.query.filter_by(name=name).first()
-    return rate.value if rate else default
-
-
-# Handle admin logout
-@app.route('/admin/logout', methods=['GET'])
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    return redirect(url_for('admin_login_page'))
 
 
 # Get all projects details
@@ -367,6 +295,78 @@ def get_project(project_id):
             }
         })
     return jsonify({'error': 'Project not found'}), 404
+
+
+# Market rates management page
+@app.route('/admin/market_rates', methods=['GET'])
+def market_rates_management():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login_page'))
+    
+    rates = MarketRate.query.all()
+    return render_template('market_rates.html', market_rates=rates)
+
+# Update market rates
+@app.route('/admin/market_rates/update', methods=['POST'])
+def update_market_rates():
+    if not session.get('admin_logged_in'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    data = request.json
+    for name, value in data.items():
+        rate = MarketRate.query.filter_by(name=name).first()
+        if rate:
+            try:
+                rate.value = float(value)
+            except ValueError:
+                return jsonify({'error': f'Invalid value for {name}'}), 400
+    
+    try:
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Initialize market rates if they don't exist
+def initialize_market_rates():
+    rates = [
+        {'name': 'ASPHALT_UNIT_COST', 'value': 110, 'description': 'Current market cost per ton of asphalt ($)'},
+        {'name': 'RECYCLED_ASPHALT_COST', 'value': 85, 'description': 'Current market cost per ton of recycled asphalt ($)'},
+        {'name': 'CONCRETE_UNIT_COST', 'value': 170, 'description': 'Current market cost per cubic yard of concrete ($)'},
+        {'name': 'BITUMINOUS_SURFACE_COST', 'value': 120, 'description': 'Current market cost per ton of bituminous surface ($)'},
+        {'name': 'SEALCOAT_UNIT_COST', 'value': 0.55, 'description': 'Current market cost per square foot of sealcoat ($)'},
+        {'name': 'REBAR_UNIT_COST', 'value': 0.80, 'description': 'Current market cost per pound of rebar ($)'},
+        {'name': 'AGGREGATE_BASE_COST', 'value': 42, 'description': 'Current market cost per ton of aggregate base ($)'},
+        {'name': 'LABOR_RATE', 'value': 62.50, 'description': 'Current market hourly labor rate ($/hour)'},
+    ]
+    
+    for rate_data in rates:
+        if not MarketRate.query.filter_by(name=rate_data['name']).first():
+            new_rate = MarketRate(
+                name=rate_data['name'],
+                value=rate_data['value'],
+                description=rate_data['description']
+            )
+            db.session.add(new_rate)
+    
+    db.session.commit()
+
+# Call this function after creating the database
+with app.app_context():
+    db.create_all()
+    initialize_market_rates()
+
+def get_market_rate(name, default=None):
+    rate = MarketRate.query.filter_by(name=name).first()
+    return rate.value if rate else default
+
+
+# Handle admin logout
+@app.route('/admin/logout', methods=['GET'])
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return redirect(url_for('admin_login_page'))
 
 
 # Extract text from PDF files
@@ -589,7 +589,8 @@ Return the JSON object. Ensure dates are in 'YYYY-MM-DD' format. For project_typ
                 data[key] = data[key][:255] if key in ['project_name', 'project_location'] else data[key][:1000]
         if 'completion_date' in data and data['completion_date']:
             try:
-                data['completion_date'] = parse_date(data['completion_date']).strftime('%Y-%m-%d')
+                # Preserve the original string format
+                data['completion_date'] = data['completion_date']
             except:
                 data['completion_date'] = ''
         
@@ -730,20 +731,23 @@ def process_estimate(data):
         
         # Determine project duration and completion date
         completion_date_str = data.get('completion_date', '')
-        duration_weeks = safe_float(data.get('project_duration', 0))
+        duration_input = safe_float(data.get('project_duration', 0))
         
+        # Preserve the original completion date
+        completion_date = None
         if completion_date_str:
             try:
-                completion_date = datetime.strptime(completion_date_str, '%Y-%m-%d')
-                today = datetime.now()
-                duration_weeks = max((completion_date - today).days / 7, 1)
-            except:
-                completion_date = datetime.now() + timedelta(weeks=8)
-                duration_weeks = 8
+                completion_date = datetime.strptime(completion_date_str, '%Y-%m-%d').date()
+            except Exception:
+                completion_date = None
+        
+        # If we don't have a valid completion date, calculate based on duration
+        if not completion_date:
+            duration_weeks = duration_input if duration_input > 0 else 8
+            completion_date = datetime.now().date() + timedelta(weeks=duration_weeks)
         else:
-            if duration_weeks <= 0:
-                duration_weeks = 8  # Default duration
-            completion_date = datetime.now() + timedelta(weeks=duration_weeks)
+            # Use the user-provided date exactly
+            duration_weeks = duration_input 
         
         # Calculate estimates with detailed logging
         material_estimates = calculate_materials(area_sqft, material_type, tonnage)
@@ -767,7 +771,7 @@ def process_estimate(data):
             'project_name': project_name,
             'project_type': project_type.capitalize(),
             'location': location,
-            'completion_date': completion_date.strftime('%Y-%m-%d'),
+            'completion_date': completion_date_str if completion_date_str else completion_date.strftime('%Y-%m-%d'),
             'duration_weeks': duration_weeks,
             'area_sqft': round(area_sqft),
             'material_type': material_type.capitalize(),
@@ -786,7 +790,7 @@ def process_estimate(data):
             submitted=datetime.now().date(),
             status='pending',
             cost=f"${financial_summary['total_cost']}",
-            completion_date=completion_date.date(),
+            completion_date=completion_date,
             land_mile=land_mile,
             width=width_ft,
             area=area_sqft,
@@ -1046,7 +1050,7 @@ def calculate_financials(materials, labor, equipment, area_sqft, duration_weeks,
         elif material_type == 'sealcoat':
             unit_cost = get_market_rate('SEALCOAT_UNIT_COST', 0.55)
             sealcoat_sqft = materials.get('sealcoat_sqft', area_sqft)
-            material_costs += sealcoat_sqft * unit_cost * MATERIAL_MARKUP    
+            material_costs += sealcoat_sqft * unit_cost * MATERIAL_MARKUP
 
         # Calculate labor costs
         labor_hours = labor.get('total_hours', 0)
@@ -1398,6 +1402,9 @@ def generate_pdf_report(project):
                     <td>{project.finishing_hours}</td>
                 </tr>
             </table>
+            <div class="text-xs text-gray-600 mt-2">
+                <i class="fas fa-info-circle"></i> Man-hour estimates are calculated based on a crew of seven people.
+            </div>
         </div>
 
         <div class="section">
